@@ -76,7 +76,8 @@ def safe_to_numeric(s: pd.Series) -> pd.Series:
 
 
 def compute_metrics(y_true, y_pred) -> dict:
-    rmse = mean_squared_error(y_true, y_pred, squared=False)
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse) # Manuel karekök alma (En garantisi)
     return {"R2": r2_score(y_true, y_pred), "MAE": mean_absolute_error(y_true, y_pred), "RMSE": rmse}
 
 
