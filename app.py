@@ -256,7 +256,10 @@ st.title("Hemogram ile B12 ve Vitamin D Tahmini (Regresyon)")
 with st.sidebar:
     st.header("Veri")
     # type=None => Streamlit MIME bloklamasın
-    uploaded = st.file_uploader("Dosya yükle (XLSX / CSV)", type=None)
+    uploaded = st.file_uploader(
+    "Dosya yükle (XLSX / CSV)",
+    type=["xlsx", "xls", "csv"]
+)
     sep = st.selectbox("CSV ayırıcı", [",", ";", "\t", "|"], index=1)
     encoding = st.selectbox("Encoding", ["utf-8", "utf-8-sig", "cp1254", "latin1"], index=1)
 
