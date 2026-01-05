@@ -261,7 +261,54 @@ if uploaded is None:
 
 # Read
 try:
-    df_raw = pd.read_csv(uploaded, sep=sep, encoding=encoding)
+    import csv
+from io import StringIO
+
+def robust_read_csv(uploaded_file, encoding: str):
+    # Dosyayı text olarak al
+    raw_bytes = uploaded_file.getvalue()
+    text = raw_bytes.decode(encoding, errors="replace")
+
+    # 1) Ayracı otomatik tahmin etmeye çalış (sniffer)
+    sample = text[:20000]
+    guessed_sep = None
+    try:
+        guessed_sep = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"]).delimiter
+    except Exception:
+        pass
+
+    # 2) Denenecek ayraçlar listesi
+    seps_to_try = []
+    if guessed_sep:
+        seps_to_try.append(guessed_sep)
+    seps_to_try += [";", ",", "\t", "|"]
+    # unique sırayı koru
+    seen = set()
+    seps_to_try = [s for s in seps_to_try if not (s in seen or seen.add(s))]
+
+    best_df = None
+    best_score = -1
+    best_sep = None
+    best_bad_lines = None
+
+    for s in seps_to_try:
+        bad_lines = []
+        try:
+            # on_bad_lines callable: bozuk satırları yakala
+            def bad_line_handler(line):
+                bad_lines.append(line)
+                return None  # satırı at
+
+            df = pd.read_csv(
+                StringIO(text),
+                sep=s,
+                engine="python",          # toleranslı parser
+                on_bad_lines=bad_line_handler,
+                quoting=csv.QUOTE_MINIMAL
+            )
+
+            # skor: dol
+
 except Exception as e:
     st.error(f"CSV okunamadı: {e}")
     st.stop()
