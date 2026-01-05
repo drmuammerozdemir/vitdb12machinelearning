@@ -216,18 +216,40 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
     """
-    XLSX/CSV okuyucu (sağlam):
-    - XLSX: BytesIO + openpyxl
-    - CSV : python engine + bad line skip
+    XLSX/CSV okuyucu (Güncellenmiş - Robust):
+    - XLSX/XLS: Pandas'ın motoru otomatik seçmesine izin verir.
+    - CSV : Python engine + bad line skip
     """
     ext = os.path.splitext(filename.lower())[1]
 
-    # ---- Excel ----
+    # ---- Excel (XLSX / XLS) ----
     if ext in [".xlsx", ".xls"]:
-        # .xlsx için openpyxl şart
-        bio = BytesIO(file_bytes)
-        df = pd.read_excel(bio, engine="openpyxl")  # tek sheet ise yeterli
-        return df, "excel", None
+        try:
+            bio = BytesIO(file_bytes)
+            # engine belirtmeyelim, pandas dosya uzantısına göre (openpyxl veya xlrd) kendisi seçsin
+            df = pd.read_excel(bio) 
+            return df, "excel", None
+        except Exception as e:
+            # Okuma hatası olursa kullanıcıya net bilgi dönmek için hatayı fırlatalım
+            raise ValueError(f"Excel dosyası okunamadı. 'openpyxl' yüklü mü? Hata detayı: {e}")
+
+    # ---- CSV ----
+    text = file_bytes.decode(encoding, errors="replace")
+
+    try:
+        sniff = csv.Sniffer().sniff(text[:20000], delimiters=[",", ";", "\t", "|"])
+        sep = sniff.delimiter
+    except Exception:
+        sep = user_sep if user_sep else ";"
+
+    bad_lines = []
+
+    def bad_handler(line):
+        bad_lines.append(line)
+        return None
+
+    df = pd.read_csv(StringIO(text), sep=sep, engine="python", on_bad_lines=bad_handler)
+    return df, f"csv(sep='{sep}')", bad_lines
 
     # ---- CSV ----
     text = file_bytes.decode(encoding, errors="replace")
