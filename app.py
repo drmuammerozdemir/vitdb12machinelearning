@@ -84,6 +84,20 @@ def compute_metrics(y_true, y_pred) -> dict:
     return {"R2": r2_score(y_true, y_pred), "MAE": mean_absolute_error(y_true, y_pred), "RMSE": rmse}
 
 
+# RAM KORUMASI: Bu fonksiyonu cache'e alıyoruz ki her defasında hesaplayıp sistemi yormasın
+@st.cache_data(show_spinner=False)
+def calculate_permutation_importance(_pipe, X_val, y_val, repeats, seed):
+    # n_jobs=1 yaparak RAM patlamasını önlüyoruz (Streamlit Cloud için şart)
+    r = permutation_importance(
+        _pipe, X_val, y_val,
+        n_repeats=repeats,
+        random_state=seed,
+        n_jobs=1,  # <--- BURASI ÇOK ÖNEMLİ (Eskiden -1 idi)
+        scoring="r2"
+    )
+    return r
+
+
 def get_feature_groups(columns: list[str]) -> dict:
     hemogram_until_wbc = [
         "BA#", "BA%", "EO#", "EO%", "HCT", "HGB", "LY#", "LY%", "MCH", "MCHC", "MCV",
@@ -106,6 +120,7 @@ def get_feature_groups(columns: list[str]) -> dict:
 
 
 def build_model(model_name: str, seed: int):
+    # Ağaç tabanlı modellerde de n_jobs=1 yaparak fit sırasında çökme riskini azaltıyoruz
     if model_name == "LinearRegression":
         return LinearRegression()
     if model_name == "Ridge":
@@ -119,11 +134,11 @@ def build_model(model_name: str, seed: int):
 
     if model_name == "RandomForest":
         return RandomForestRegressor(
-            n_estimators=500, random_state=seed, n_jobs=-1, max_depth=None, min_samples_leaf=2
+            n_estimators=300, random_state=seed, n_jobs=1, max_depth=None, min_samples_leaf=2
         )
     if model_name == "ExtraTrees":
         return ExtraTreesRegressor(
-            n_estimators=800, random_state=seed, n_jobs=-1, max_depth=None, min_samples_leaf=2
+            n_estimators=500, random_state=seed, n_jobs=1, max_depth=None, min_samples_leaf=2
         )
     if model_name == "GradientBoosting":
         return GradientBoostingRegressor(random_state=seed)
@@ -134,14 +149,14 @@ def build_model(model_name: str, seed: int):
         if XGBRegressor is None:
             raise RuntimeError("xgboost yüklü değil. requirements.txt'e ekleyin.")
         return XGBRegressor(
-            n_estimators=1200,
+            n_estimators=1000,
             learning_rate=0.03,
             max_depth=5,
             subsample=0.9,
             colsample_bytree=0.9,
             reg_lambda=1.0,
             random_state=seed,
-            n_jobs=-1,
+            n_jobs=1, # RAM Koruması
             objective="reg:squarederror",
         )
 
@@ -149,25 +164,26 @@ def build_model(model_name: str, seed: int):
         if LGBMRegressor is None:
             raise RuntimeError("lightgbm yüklü değil. requirements.txt'e ekleyin.")
         return LGBMRegressor(
-            n_estimators=2000,
+            n_estimators=1500,
             learning_rate=0.03,
             num_leaves=31,
             subsample=0.9,
             colsample_bytree=0.9,
             random_state=seed,
-            n_jobs=-1,
+            n_jobs=1, # RAM Koruması
         )
 
     if model_name == "CatBoost (if installed)":
         if CatBoostRegressor is None:
             raise RuntimeError("catboost yüklü değil. requirements.txt'e ekleyin.")
         return CatBoostRegressor(
-            iterations=3000,
+            iterations=2000,
             learning_rate=0.03,
             depth=6,
             random_seed=seed,
             loss_function="RMSE",
-            verbose=False
+            verbose=False,
+            thread_count=1 # RAM Koruması
         )
 
     raise ValueError("Bilinmeyen model seçimi.")
@@ -219,18 +235,12 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
-    """
-    XLSX/CSV okuyucu (Robust):
-    - XLSX/XLS: Pandas motorunu otomatik seçer.
-    - CSV : python engine + bad line skip
-    """
     ext = os.path.splitext(filename.lower())[1]
 
     # ---- Excel ----
     if ext in [".xlsx", ".xls"]:
         try:
             bio = BytesIO(file_bytes)
-            # engine=None diyerek Pandas'ın otomatik (openpyxl veya xlrd) seçmesini sağlıyoruz
             df = pd.read_excel(bio)
             return df, "excel", None
         except Exception as e:
@@ -262,7 +272,6 @@ st.title("Hemogram ile B12 ve Vitamin D Tahmini (Regresyon)")
 
 with st.sidebar:
     st.header("Veri")
-    # Dosya yükleme (XLSX ve CSV açık)
     uploaded = st.file_uploader(
         "Dosya yükle (XLSX / CSV)",
         type=["xlsx", "xls", "csv"]
@@ -291,8 +300,9 @@ with st.sidebar:
     st.divider()
     st.header("Değerlendirme")
     cv_folds = st.slider("CV fold", 3, 10, 5, 1)
-    do_perm_importance = st.checkbox("Permutation importance hesapla (daha yavaş)", value=True)
-    perm_repeats = st.slider("Permutation tekrar", 3, 20, 8, 1)
+    # Varsayılanı kapalı yapıyoruz, kullanıcı isterse açsın (Hata önlemek için)
+    do_perm_importance = st.checkbox("Permutation importance hesapla (Dikkat: Yavaş ve RAM tüketir)", value=False)
+    perm_repeats = st.slider("Permutation tekrar", 2, 10, 5, 1) # Varsayılanı 5'e düşürdük
 
 st.caption("Not: Bu uygulama klinik karar aracı değildir; araştırma/hipotez amaçlıdır.")
 
@@ -404,13 +414,9 @@ st.write(res_df.head(20))
 if do_perm_importance:
     st.subheader("Özellik Önemi (Permutation Importance)")
     with st.spinner("Permutation importance hesaplanıyor (biraz sürebilir)..."):
-        r = permutation_importance(
-            pipe, X_test, y_test,
-            n_repeats=int(perm_repeats),
-            random_state=int(seed),
-            n_jobs=-1,
-            scoring="r2",
-        )
+        # YENİ CACHED FONKSİYONU ÇAĞIRIYORUZ
+        r = calculate_permutation_importance(pipe, X_test, y_test, int(perm_repeats), int(seed))
+        
     imp = pd.DataFrame({
         "feature": X_test.columns,
         "importance_mean": r.importances_mean,
