@@ -19,7 +19,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 
-# GÜNCELLEME: squared parametresi kalktı, manuel hesaplayacağız
+# Scikit-learn 1.6+ uyumlu metrikler (RMSE manuel hesaplanacak)
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.inspection import permutation_importance
 
@@ -34,7 +34,7 @@ from sklearn.ensemble import (
     HistGradientBoostingRegressor,
 )
 
-# Optional: XGBoost / LightGBM / CatBoost (enabled if installed)
+# Optional libraries check
 XGBRegressor = None
 LGBMRegressor = None
 CatBoostRegressor = None
@@ -57,7 +57,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="Hemogram → B12 & Vit D Tahmini", layout="wide")
+st.set_page_config(page_title="Hemogram -> B12 & Vit D Tahmini", layout="wide")
 
 
 # -----------------------------
@@ -77,8 +77,8 @@ def safe_to_numeric(s: pd.Series) -> pd.Series:
 
 
 def compute_metrics(y_true, y_pred) -> dict:
-    # GÜNCELLEME: scikit-learn v1.6+ uyumluluğu için squared parametresi kaldırıldı.
-    # RMSE'yi manuel olarak karekök alarak hesaplıyoruz.
+    # KRİTİK DÜZELTME: squared=False parametresi KALDIRILDI.
+    # RMSE'yi manuel hesaplıyoruz. Bu yöntem her versiyonda çalışır.
     mse = mean_squared_error(y_true, y_pred)
     rmse = np.sqrt(mse)
     return {"R2": r2_score(y_true, y_pred), "MAE": mean_absolute_error(y_true, y_pred), "RMSE": rmse}
@@ -221,7 +221,7 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
     """
     XLSX/CSV okuyucu (Robust):
-    - XLSX/XLS: Pandas motorunu otomatik seçer (openpyxl veya xlrd).
+    - XLSX/XLS: Pandas motorunu otomatik seçer.
     - CSV : python engine + bad line skip
     """
     ext = os.path.splitext(filename.lower())[1]
@@ -230,7 +230,7 @@ def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep
     if ext in [".xlsx", ".xls"]:
         try:
             bio = BytesIO(file_bytes)
-            # engine parametresini kaldırdık, pandas otomatik bulsun
+            # engine=None diyerek Pandas'ın otomatik (openpyxl veya xlrd) seçmesini sağlıyoruz
             df = pd.read_excel(bio)
             return df, "excel", None
         except Exception as e:
@@ -262,7 +262,7 @@ st.title("Hemogram ile B12 ve Vitamin D Tahmini (Regresyon)")
 
 with st.sidebar:
     st.header("Veri")
-    # GÜNCELLEME: Type listesine xlsx ve xls eklendi.
+    # Dosya yükleme (XLSX ve CSV açık)
     uploaded = st.file_uploader(
         "Dosya yükle (XLSX / CSV)",
         type=["xlsx", "xls", "csv"]
@@ -373,7 +373,7 @@ cv = KFold(n_splits=int(cv_folds), shuffle=True, random_state=int(seed))
 scoring = {"r2": "r2", "mae": "neg_mean_absolute_error", "rmse": "neg_root_mean_squared_error"}
 
 with st.spinner("CV hesaplanıyor..."):
-    # neg_root_mean_squared_error hala destekleniyor ancak metrics fonksiyonumuzda manuel yaptık
+    # neg_root_mean_squared_error hala string olarak desteklense de metrics fonksiyonumuz manuel.
     cv_res = cross_validate(pipe, X_train, y_train, cv=cv, scoring=scoring, n_jobs=-1, return_train_score=False)
 
 cv_r2 = float(np.mean(cv_res["test_r2"]))
