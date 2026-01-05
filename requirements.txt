@@ -1,9 +1,9 @@
-streamlit
+streamlit>=1.30.0
 pandas
 numpy
+openpyxl
 scikit-learn
 xgboost
 lightgbm
 catboost
 matplotlib
-openpyxl
