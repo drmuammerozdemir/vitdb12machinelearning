@@ -3,7 +3,7 @@ pandas
 numpy<2.0.0
 openpyxl
 xlrd
-scikit-learn
+scikit-learn<1.4.0
 xgboost
 lightgbm
 catboost
