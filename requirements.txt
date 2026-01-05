@@ -2,6 +2,7 @@ streamlit>=1.30.0
 pandas
 numpy
 openpyxl
+xlrd
 scikit-learn
 xgboost
 lightgbm
