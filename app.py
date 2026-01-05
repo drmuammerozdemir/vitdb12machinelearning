@@ -19,6 +19,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 
+# GÜNCELLEME: squared parametresi kalktı, manuel hesaplayacağız
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.inspection import permutation_importance
 
@@ -76,8 +77,10 @@ def safe_to_numeric(s: pd.Series) -> pd.Series:
 
 
 def compute_metrics(y_true, y_pred) -> dict:
+    # GÜNCELLEME: scikit-learn v1.6+ uyumluluğu için squared parametresi kaldırıldı.
+    # RMSE'yi manuel olarak karekök alarak hesaplıyoruz.
     mse = mean_squared_error(y_true, y_pred)
-    rmse = np.sqrt(mse) # Manuel karekök alma (En garantisi)
+    rmse = np.sqrt(mse)
     return {"R2": r2_score(y_true, y_pred), "MAE": mean_absolute_error(y_true, y_pred), "RMSE": rmse}
 
 
@@ -217,40 +220,21 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
     """
-    XLSX/CSV okuyucu (Güncellenmiş - Robust):
-    - XLSX/XLS: Pandas'ın motoru otomatik seçmesine izin verir.
-    - CSV : Python engine + bad line skip
+    XLSX/CSV okuyucu (Robust):
+    - XLSX/XLS: Pandas motorunu otomatik seçer (openpyxl veya xlrd).
+    - CSV : python engine + bad line skip
     """
     ext = os.path.splitext(filename.lower())[1]
 
-    # ---- Excel (XLSX / XLS) ----
+    # ---- Excel ----
     if ext in [".xlsx", ".xls"]:
         try:
             bio = BytesIO(file_bytes)
-            # engine belirtmeyelim, pandas dosya uzantısına göre (openpyxl veya xlrd) kendisi seçsin
-            df = pd.read_excel(bio) 
+            # engine parametresini kaldırdık, pandas otomatik bulsun
+            df = pd.read_excel(bio)
             return df, "excel", None
         except Exception as e:
-            # Okuma hatası olursa kullanıcıya net bilgi dönmek için hatayı fırlatalım
-            raise ValueError(f"Excel dosyası okunamadı. 'openpyxl' yüklü mü? Hata detayı: {e}")
-
-    # ---- CSV ----
-    text = file_bytes.decode(encoding, errors="replace")
-
-    try:
-        sniff = csv.Sniffer().sniff(text[:20000], delimiters=[",", ";", "\t", "|"])
-        sep = sniff.delimiter
-    except Exception:
-        sep = user_sep if user_sep else ";"
-
-    bad_lines = []
-
-    def bad_handler(line):
-        bad_lines.append(line)
-        return None
-
-    df = pd.read_csv(StringIO(text), sep=sep, engine="python", on_bad_lines=bad_handler)
-    return df, f"csv(sep='{sep}')", bad_lines
+            raise ValueError(f"Excel dosyası okunamadı. Format hatası: {e}")
 
     # ---- CSV ----
     text = file_bytes.decode(encoding, errors="replace")
@@ -278,11 +262,11 @@ st.title("Hemogram ile B12 ve Vitamin D Tahmini (Regresyon)")
 
 with st.sidebar:
     st.header("Veri")
-    # type=None => Streamlit MIME bloklamasın
+    # GÜNCELLEME: Type listesine xlsx ve xls eklendi.
     uploaded = st.file_uploader(
-    "Dosya yükle (XLSX / CSV)",
-    type=["xlsx", "xls", "csv"]
-)
+        "Dosya yükle (XLSX / CSV)",
+        type=["xlsx", "xls", "csv"]
+    )
     sep = st.selectbox("CSV ayırıcı", [",", ";", "\t", "|"], index=1)
     encoding = st.selectbox("Encoding", ["utf-8", "utf-8-sig", "cp1254", "latin1"], index=1)
 
@@ -389,6 +373,7 @@ cv = KFold(n_splits=int(cv_folds), shuffle=True, random_state=int(seed))
 scoring = {"r2": "r2", "mae": "neg_mean_absolute_error", "rmse": "neg_root_mean_squared_error"}
 
 with st.spinner("CV hesaplanıyor..."):
+    # neg_root_mean_squared_error hala destekleniyor ancak metrics fonksiyonumuzda manuel yaptık
     cv_res = cross_validate(pipe, X_train, y_train, cv=cv, scoring=scoring, n_jobs=-1, return_train_score=False)
 
 cv_r2 = float(np.mean(cv_res["test_r2"]))
