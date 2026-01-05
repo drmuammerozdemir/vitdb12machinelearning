@@ -224,7 +224,7 @@ st.title("Hemogram ile B12 ve Vitamin D Tahmini (Regresyon)")
 
 with st.sidebar:
     st.header("Veri")
-    uploaded = st.file_uploader("CSV yükle", type=["csv"])
+    uploaded = st.file_uploader("Dosya yükle (XLSX/CSV)", type=["xlsx", "xls", "csv"])
     sep = st.selectbox("CSV ayırıcı", [",", ";", "\t"], index=0)
     encoding = st.selectbox("Encoding", ["utf-8", "utf-8-sig", "cp1254", "latin1"], index=1)
 
@@ -264,50 +264,62 @@ try:
     import csv
 from io import StringIO
 
-def robust_read_csv(uploaded_file, encoding: str):
-    # Dosyayı text olarak al
-    raw_bytes = uploaded_file.getvalue()
-    text = raw_bytes.decode(encoding, errors="replace")
+import os
+import csv
+from io import StringIO
 
-    # 1) Ayracı otomatik tahmin etmeye çalış (sniffer)
-    sample = text[:20000]
-    guessed_sep = None
+@st.cache_data(show_spinner=False)
+def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
+    ext = os.path.splitext(filename.lower())[1]
+
+    if ext in [".xlsx", ".xls"]:
+        # Excel okuma
+        # Not: .xls için bazen xlrd gerekir; çoğunlukla .xlsx kullanmanızı öneririm.
+        df = pd.read_excel(file_bytes, engine="openpyxl")
+        return df, "excel", None
+
+    # CSV okuma (fallback)
+    text = file_bytes.decode(encoding, errors="replace")
+
+    # delimiter sniff
     try:
-        guessed_sep = csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t", "|"]).delimiter
+        sniff = csv.Sniffer().sniff(text[:20000], delimiters=[",", ";", "\t", "|"])
+        auto_sep = sniff.delimiter
     except Exception:
-        pass
+        auto_sep = user_sep
 
-    # 2) Denenecek ayraçlar listesi
-    seps_to_try = []
-    if guessed_sep:
-        seps_to_try.append(guessed_sep)
-    seps_to_try += [";", ",", "\t", "|"]
-    # unique sırayı koru
-    seen = set()
-    seps_to_try = [s for s in seps_to_try if not (s in seen or seen.add(s))]
+    bad_lines = []
+    def bad_handler(line):
+        bad_lines.append(line)
+        return None
 
-    best_df = None
-    best_score = -1
-    best_sep = None
-    best_bad_lines = None
+    df = pd.read_csv(
+        StringIO(text),
+        sep=auto_sep,
+        engine="python",
+        on_bad_lines=bad_handler
+    )
+    return df, f"csv(sep='{auto_sep}')", bad_lines
 
-    for s in seps_to_try:
-        bad_lines = []
-        try:
-            # on_bad_lines callable: bozuk satırları yakala
-            def bad_line_handler(line):
-                bad_lines.append(line)
-                return None  # satırı at
 
-            df = pd.read_csv(
-                StringIO(text),
-                sep=s,
-                engine="python",          # toleranslı parser
-                on_bad_lines=bad_line_handler,
-                quoting=csv.QUOTE_MINIMAL
-            )
+# ---- burada kullan ----
+file_bytes = uploaded.getvalue()
+df_raw, read_mode, bad_lines = read_uploaded_file(
+    file_bytes=file_bytes,
+    filename=uploaded.name,
+    encoding=encoding,
+    user_sep=sep,
+)
 
-            # skor: dol
+if df_raw is None:
+    st.error("Dosya okunamadı.")
+    st.stop()
+
+st.success(f"Dosya okundu ✅ ({read_mode}) | satır: {len(df_raw):,} | sütun: {df_raw.shape[1]}")
+
+if bad_lines:
+    st.warning(f"{len(bad_lines)} bozuk satır CSV'den atlandı. İlk 2 satır:")
+    st.code("\n".join([str(x) for x in bad_lines[:2]]))
 
 except Exception as e:
     st.error(f"CSV okunamadı: {e}")
