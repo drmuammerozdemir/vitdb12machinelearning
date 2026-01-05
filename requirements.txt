@@ -1,6 +1,6 @@
 streamlit>=1.30.0
 pandas
-numpy
+numpy<2.0.0
 openpyxl
 xlrd
 scikit-learn
