@@ -8,11 +8,15 @@ import re
 import os
 import csv
 from io import StringIO, BytesIO
-from scipy.stats import kruskal, f_oneway, shapiro
+from scipy.stats import kruskal, f_oneway, shapiro, ttest_ind, mannwhitneyu
+
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
 
 from sklearn.model_selection import train_test_split, KFold, cross_validate
 from sklearn.compose import ColumnTransformer
@@ -326,6 +330,7 @@ def segment_age_groups(df: pd.DataFrame) -> pd.DataFrame:
 def segment_clinical_groups(df: pd.DataFrame) -> pd.DataFrame:
     """
     B12 ve Vitamin D seviyelerine göre gruplama yapar.
+    DÜZELTME: np.select içinde default değer 'np.nan' yerine 'Diğer' yapıldı (TypeError hatası için).
     """
     # --- B12 GRUPLAMA (<200, 200-400, >400) ---
     if "B12" in df.columns:
@@ -334,9 +339,10 @@ def segment_clinical_groups(df: pd.DataFrame) -> pd.DataFrame:
             (df['B12'] >= 200) & (df['B12'] <= 400),
             (df['B12'] > 400)
         ]
-        # Sıralama önemli olduğu için alfabetik değil mantıksal isimlendirme
         choices_b12 = ['1. Düşük (<200)', '2. Sınırda (200-400)', '3. Yüksek (>400)']
-        df['B12_Grubu'] = np.select(conditions_b12, choices_b12, default=np.nan)
+        
+        # HATA DÜZELTİLDİ: default=np.nan yerine default='Diğer'
+        df['B12_Grubu'] = np.select(conditions_b12, choices_b12, default='Diğer')
 
     # --- VITAMIN D GRUPLAMA (<20, 20-30, >30) ---
     if "VİTAMİN D" in df.columns:
@@ -346,7 +352,9 @@ def segment_clinical_groups(df: pd.DataFrame) -> pd.DataFrame:
             (df['VİTAMİN D'] > 30)
         ]
         choices_vitd = ['1. Eksiklik (<20)', '2. Yetersizlik (20-30)', '3. Yeterli (>30)']
-        df['VitD_Grubu'] = np.select(conditions_vitd, choices_vitd, default=np.nan)
+        
+        # HATA DÜZELTİLDİ: default=np.nan yerine default='Diğer'
+        df['VitD_Grubu'] = np.select(conditions_vitd, choices_vitd, default='Diğer')
         
     return df
 def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list, force_parametric: bool = False):
@@ -433,6 +441,79 @@ def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list
         results.append(row)
         
     return pd.DataFrame(results)
+
+def plot_group_comparison(df, group_col, value_col, force_parametric=False):
+    """
+    Referans görsele benzer şekilde:
+    1. Ham veriyi nokta olarak basar (Strip Plot).
+    2. %95 Güven Aralığını (CI) ve Ortalamayı/Medyanı çizer (Point Plot).
+    3. Global P değerini başlığa yazar.
+    """
+    # Veri Hazırlığı
+    valid_groups = sorted([g for g in df[group_col].unique() if pd.notna(g) and str(g) != 'Diğer'])
+    plot_df = df[df[group_col].isin(valid_groups)].copy()
+    
+    # Boş veri temizliği
+    plot_df = plot_df.dropna(subset=[value_col])
+    if plot_df.empty:
+        return None
+
+    # Grafik Alanı Oluştur
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Renk Paleti
+    palette = sns.color_palette("viridis", n_colors=len(valid_groups))
+
+    # 1. HAM VERİ NOKTALARI (Strip Plot) - Resimdeki dağınık noktalar
+    sns.stripplot(
+        data=plot_df, x=group_col, y=value_col, 
+        order=valid_groups, jitter=0.2, alpha=0.6, size=4, palette=palette, ax=ax, zorder=0
+    )
+
+    # 2. %95 GÜVEN ARALIĞI VE MERKEZ (Point Plot) - Resimdeki siyah çizgiler
+    # Parametrik -> Ortalama ve %95 CI
+    # Non-Parametrik -> Medyan ve %95 CI (Bootstrap ile hesaplanır)
+    estimator = np.mean if force_parametric else np.median
+    est_label = "Ortalama" if force_parametric else "Medyan"
+    
+    sns.pointplot(
+        data=plot_df, x=group_col, y=value_col,
+        order=valid_groups, estimator=estimator, errorbar=('ci', 95),
+        color='black', capsize=0.1, join=False, markers="_", scale=0, err_kws={'linewidth': 2}, ax=ax, zorder=10
+    )
+    
+    # Ortaya belirgin bir nokta koy (Merkezi eğilim için)
+    sns.pointplot(
+        data=plot_df, x=group_col, y=value_col,
+        order=valid_groups, estimator=estimator, errorbar=None,
+        color='black', join=False, markers="D", scale=0.8, ax=ax, zorder=11
+    )
+
+    # 3. İSTATİSTİK TESTİ (Başlık İçin)
+    groups_data = [plot_df[plot_df[group_col] == g][value_col] for g in valid_groups]
+    
+    p_val = 1.0
+    test_name = ""
+    try:
+        if force_parametric:
+            _, p_val = f_oneway(*groups_data)
+            test_name = "ANOVA"
+        else:
+            _, p_val = kruskal(*groups_data)
+            test_name = "Kruskal-Wallis"
+    except:
+        pass
+
+    p_text = "< 0.001" if p_val < 0.001 else f"{p_val:.3f}"
+    
+    # Grafik Süslemeleri
+    ax.set_title(f"{value_col} Dağılımı ve %95 Güven Aralığı ({est_label})\n{test_name} P-Değeri: {p_text}", fontsize=14, fontweight='bold')
+    ax.set_xlabel(group_col.replace("_", " "), fontsize=12)
+    ax.set_ylabel(value_col, fontsize=12)
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    sns.despine() # Çerçevenin üst ve sağ çizgisini kaldır (Resimdeki gibi temiz görünüm)
+
+    return fig
     
 @st.cache_data(show_spinner=False)
 def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
@@ -608,6 +689,36 @@ if group_options:
         )
     else:
         st.warning("Seçilen grup için yeterli veri bulunamadı.")
+# ... (st.download_button kodunun hemen altı) ...
+        
+        # --- GRAFİK BÖLÜMÜ (YENİ EKLENEN KISIM) ---
+        st.divider()
+        st.subheader("📊 Grafiksel Analiz (%95 CI)")
+        
+        # Hangi parametreyi çizmek istediğini sor
+        graph_param = st.selectbox(
+            "Grafiğini çizmek istediğiniz parametreyi seçin:",
+            options=present_params,
+            index=0
+        )
+        
+        if graph_param:
+            st.markdown(f"**{graph_param}** parametresinin **{selected_label}** gruplarına göre dağılımı:")
+            
+            # Grafiği Çiz
+            fig = plot_group_comparison(df, selected_group_col, graph_param, force_parametric=force_para)
+            
+            if fig:
+                st.pyplot(fig)
+                st.caption(
+                    "**Grafik Açıklaması:** Renkli noktalar bireysel hasta verilerini gösterir. "
+                    "Siyah kare/çizgi ise grubun **Merkezi Eğilimini (Medyan/Ortalama)** ve **%95 Güven Aralığını (CI)** temsil eder. "
+                    "Güven aralıkları örtüşmüyorsa gruplar arası farkın anlamlı olma ihtimali yüksektir."
+                )
+            else:
+                st.warning("Grafik oluşturulamadı (Yetersiz veri).")
+
+
 else:
     st.warning("Gruplama yapılabilecek veri (Yaş, B12 veya Vit D) bulunamadı.")
 
