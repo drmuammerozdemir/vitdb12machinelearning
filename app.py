@@ -341,56 +341,62 @@ def perform_advanced_roc(df, target_vitamin, threshold, feature_cols, condition_
 
 def perform_multivariate_roc(df, target_col, threshold, features):
     """
-    Seçilen birden fazla özelliği Lojistik Regresyon ile birleştirip
-    tek bir 'Kombine Model Skoru' oluşturur ve ROC çizer.
+    Seçilen özellikleri Lojistik Regresyon ile birleştirir.
+    Geriye AUC skoru, Grafik ve Katsayı Tablosu döndürür.
     """
     # Veriyi hazırla
     temp_df = df.dropna(subset=[target_col] + features).copy()
     if temp_df.empty:
-        return None, None
+        return "Veri Yok", None, None
 
-    # Hedef (1: Hasta, 0: Sağlam) - Threshold mantığı
+    # Hedef (1: Hasta, 0: Sağlam)
     y = (temp_df[target_col] < threshold).astype(int)
     
-    # Eğer sınıflardan biri hiç yoksa hata döner
     if len(np.unique(y)) < 2:
-        return "Yetersiz varyasyon (Tüm hastalar aynı grupta)", None
+        return "Yetersiz varyasyon (Tüm hastalar aynı grupta)", None, None
 
     X = temp_df[features]
 
-    # Standardizasyon (Regresyon için önemlidir)
+    # Standardizasyon
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Modeli Kur (Lojistik Regresyon)
-    model = LogisticRegression(class_weight='balanced')
+    # Model
+    model = LogisticRegression(class_weight='balanced', max_iter=1000)
     model.fit(X_scaled, y)
-
-    # Olasılık Skorlarını Al (0 ile 1 arası bir risk puanı)
     y_probs = model.predict_proba(X_scaled)[:, 1]
 
-    # ROC Hesapla
+    # ROC
     fpr, tpr, _ = roc_curve(y, y_probs)
     roc_auc = auc(fpr, tpr)
 
-    # Grafik Çiz
+    # Grafik
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(fpr, tpr, label=f'Kombine Model (AUC = {roc_auc:.3f})', color='darkorange', lw=2)
+    ax.plot(fpr, tpr, label=f'Kombine Model (AUC = {roc_auc:.3f})', color='#ff6f61', lw=3)
     ax.plot([0, 1], [0, 1], 'k--', lw=2)
-    
-    # Hangi parametre ne kadar etkili oldu? (Katsayılar)
-    coef_text = "\n".join([f"{feat}: {coef:.2f}" for feat, coef in zip(features, model.coef_[0])])
-    
     ax.set_title(f'Çok Değişkenli Model ROC (Hedef: {target_col} < {threshold})')
     ax.set_xlabel('False Positive Rate')
     ax.set_ylabel('True Positive Rate')
     ax.legend(loc="lower right")
+    ax.grid(alpha=0.3)
+
+    # --- TABLO OLUŞTURMA KISMI ---
+    # Katsayıları DataFrame'e çevir
+    coef_data = {
+        'Parametre': features,
+        'Katsayı (Ağırlık)': model.coef_[0]
+    }
+    df_coef = pd.DataFrame(coef_data)
+    # Mutlak değere göre sırala (En etkili en üstte)
+    df_coef['Etki Gücü (Mutlak)'] = df_coef['Katsayı (Ağırlık)'].abs()
+    df_coef = df_coef.sort_values(by='Etki Gücü (Mutlak)', ascending=False).drop(columns=['Etki Gücü (Mutlak)'])
     
-    # Katsayıları grafiğin kenarına not düş (Opsiyonel bilgi)
-    plt.gcf().text(0.92, 0.5, f"Parametre Ağırlıkları:\n{coef_text}", fontsize=10, bbox=dict(facecolor='white', alpha=0.5))
+    # Görsellik için formatlama
+    df_coef['Yön'] = df_coef['Katsayı (Ağırlık)'].apply(lambda x: "Pozitif (+)" if x > 0 else "Negatif (-)")
+    df_coef['Katsayı (Ağırlık)'] = df_coef['Katsayı (Ağırlık)'].apply(lambda x: f"{x:.4f}")
 
-    return f"Model AUC: {roc_auc:.3f}", fig
-
+    return f"Model AUC: {roc_auc:.3f}", fig, df_coef
+    
 @st.cache_data(show_spinner=False)
 def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
     ext = os.path.splitext(filename.lower())[1]
@@ -598,5 +604,48 @@ with tab2:
                     st.success("Bu skor, seçilen parametrelerin birlikte kullanılmasıyla ulaşılan en yüksek teorik başarıdır.")
                 with col2:
                     st.pyplot(model_fig)
+            else:
+                st.error(model_res)
+
+# --- TAB 2 İÇİNE EKLENECEK KOD (Mevcut kodların altına) ---
+    st.divider()
+    st.subheader("🤖 Yapay Zeka Destekli Model (Logistic Regression)")
+    st.info("Model, seçtiğiniz parametrelerin hangisinin B12 eksikliğini tahmin etmede daha önemli olduğunu hesaplar.")
+    
+    # Varsayılan olarak en güçlü çıkanları seçili getirelim
+    suggested_defaults = ["MCV", "Mentzer", "AISI", "Pan_B12_Index", "HGB"]
+    # Listede varsa seç, yoksa boşver
+    default_selection = [p for p in suggested_defaults if p in present_params]
+
+    multi_features = st.multiselect(
+        "Modele dahil edilecek parametreleri seçin (Gürültüyü azaltmak için az ve öz seçin):", 
+        options=present_params,
+        default=default_selection if default_selection else present_params[:3]
+    )
+    
+    if st.button("Kombine Model Oluştur & Tabloyu Göster"):
+        if len(multi_features) < 2:
+            st.warning("En az 2 parametre seçmelisiniz.")
+        else:
+            # Fonksiyon artık 3 değer döndürüyor (Metin, Grafik, Tablo)
+            model_res, model_fig, df_weights = perform_multivariate_roc(df_analysis, target_col, threshold, multi_features)
+            
+            if model_fig:
+                c1, c2 = st.columns([2, 1])
+                
+                with c1:
+                    st.pyplot(model_fig)
+                
+                with c2:
+                    st.markdown("### 📊 Parametre Önem Düzeyleri")
+                    st.write(f"**{model_res}**")
+                    st.caption("Katsayı ne kadar büyükse (negatif veya pozitif), parametre o kadar önemlidir.")
+                    
+                    # Tabloyu Renkli Göster
+                    st.dataframe(
+                        df_weights, 
+                        use_container_width=True, 
+                        hide_index=True
+                    )
             else:
                 st.error(model_res)
