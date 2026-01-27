@@ -322,89 +322,115 @@ def segment_age_groups(df: pd.DataFrame) -> pd.DataFrame:
     df['Yas_Grubu'] = np.select(conditions, choices, default='Diğer')
     return df
 
+#-------------B12 VE D VİTAMİNİ SEVİYELERİNE GÖRE SINIFLAMA YAPMA-------------#
+def segment_clinical_groups(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    B12 ve Vitamin D seviyelerine göre gruplama yapar.
+    """
+    # --- B12 GRUPLAMA (<200, 200-400, >400) ---
+    if "B12" in df.columns:
+        conditions_b12 = [
+            (df['B12'] < 200),
+            (df['B12'] >= 200) & (df['B12'] <= 400),
+            (df['B12'] > 400)
+        ]
+        # Sıralama önemli olduğu için alfabetik değil mantıksal isimlendirme
+        choices_b12 = ['1. Düşük (<200)', '2. Sınırda (200-400)', '3. Yüksek (>400)']
+        df['B12_Grubu'] = np.select(conditions_b12, choices_b12, default=np.nan)
+
+    # --- VITAMIN D GRUPLAMA (<20, 20-30, >30) ---
+    if "VİTAMİN D" in df.columns:
+        conditions_vitd = [
+            (df['VİTAMİN D'] < 20),
+            (df['VİTAMİN D'] >= 20) & (df['VİTAMİN D'] <= 30),
+            (df['VİTAMİN D'] > 30)
+        ]
+        choices_vitd = ['1. Eksiklik (<20)', '2. Yetersizlik (20-30)', '3. Yeterli (>30)']
+        df['VitD_Grubu'] = np.select(conditions_vitd, choices_vitd, default=np.nan)
+        
+    return df
 def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list, force_parametric: bool = False):
-    """
-    force_parametric=True ise: Normallik testine bakmaksızın Ortalama ± SS verir.
-    force_parametric=False ise: Shapiro-Wilk sonucuna göre otomatik seçer.
-    """
     results = []
     
-    valid_groups = ['Okul Öncesi (0-5)', 'Okul Çağı (6-11)', 'Adolesan (12-17)']
+    # Hangi sütuna göre grupluyorsak, o sütundaki geçerli grupları belirle
+    # Grupların sırasını (1., 2., 3. diye numaralandırdığımız için) sort ediyoruz.
+    if groups_col not in df.columns:
+        return pd.DataFrame()
+
+    # NaN olmayan benzersiz grupları al ve sırala
+    valid_groups = sorted([g for g in df[groups_col].unique() if pd.notna(g) and g != 'Diğer'])
     
+    # Eğer grup sayısı 2'den azsa istatistik yapılamaz
+    if len(valid_groups) < 2:
+        return pd.DataFrame()
+
     # 1. BAŞLIKLARI VE TOPLAM SAYILARI SABİTLE
     group_counts = df[groups_col].value_counts()
     
-    n1 = group_counts.get(valid_groups[0], 0)
-    n2 = group_counts.get(valid_groups[1], 0)
-    n3 = group_counts.get(valid_groups[2], 0)
-    
-    col_name_1 = f"{valid_groups[0]} (n={n1})"
-    col_name_2 = f"{valid_groups[1]} (n={n2})"
-    col_name_3 = f"{valid_groups[2]} (n={n3})"
+    # Dinamik başlık listesi oluştur
+    col_names = {}
+    for g in valid_groups:
+        count = group_counts.get(g, 0)
+        col_names[g] = f"{g} (n={count})"
     
     df_stat = df[df[groups_col].isin(valid_groups)].copy()
 
     for p in params:
-        # Eğer parametre sütunu veride hiç yoksa atla (Hata vermemesi için)
         if p not in df_stat.columns:
             continue
             
         clean_col = df_stat.dropna(subset=[p])
         
-        g1 = clean_col[clean_col[groups_col] == valid_groups[0]][p]
-        g2 = clean_col[clean_col[groups_col] == valid_groups[1]][p]
-        g3 = clean_col[clean_col[groups_col] == valid_groups[2]][p]
+        # Grupları ayır (Dynamic List Comprehension)
+        groups_data = [clean_col[clean_col[groups_col] == g][p] for g in valid_groups]
         
-        # Shapiro testi için en az 3 veri gerekir
-        if len(g1) < 3 or len(g2) < 3 or len(g3) < 3:
+        # Her grupta en az 3 veri var mı kontrolü
+        if any(len(g) < 3 for g in groups_data):
             continue
             
-        # 2. NORMALLİK TESTİ (Sadece otomatik modda çalışır)
+        # 2. NORMALLİK TESTİ
         is_normal = False
         if not force_parametric:
             try:
-                _, p1 = shapiro(g1)
-                _, p2 = shapiro(g2)
-                _, p3 = shapiro(g3)
-                is_normal = (p1 > 0.05) and (p2 > 0.05) and (p3 > 0.05)
+                # Tüm gruplar için Shapiro testi
+                p_values = [shapiro(g)[1] for g in groups_data]
+                is_normal = all(p > 0.05 for p in p_values)
             except:
-                is_normal = False # Hata durumunda non-parametrik
+                is_normal = False 
         
-        # 3. FORMATLAMA
-        # Kullanıcı zorladıysa (force) veya veri gerçekten normalse -> Parametrik
+        # 3. FORMATLAMA VE TEST
+        row = {"Parametre": p}
+        
         if force_parametric or is_normal:
-            # --- PARAMETRİK (Ortalama ± SS) ---
-            val1 = f"{g1.mean():.2f} ± {g1.std():.2f}"
-            val2 = f"{g2.mean():.2f} ± {g2.std():.2f}"
-            val3 = f"{g3.mean():.2f} ± {g3.std():.2f}"
+            # --- PARAMETRİK (Mean ± SD) ---
+            for g, data in zip(valid_groups, groups_data):
+                row[col_names[g]] = f"{data.mean():.2f} ± {data.std():.2f}"
+            
             try:
-                _, p_val = f_oneway(g1, g2, g3)
-                test_desc = "ANOVA (Mean±SD)"
+                # Dinamik argüman aktarımı (*) ile ANOVA
+                _, p_val = f_oneway(*groups_data)
+                test_desc = "ANOVA"
             except:
                 p_val = 1.0
                 test_desc = "Hata"
         else:
-            # --- NON-PARAMETRİK (Medyan (Min - Max)) ---
-            val1 = f"{g1.median():.2f} ({g1.min():.2f} - {g1.max():.2f})"
-            val2 = f"{g2.median():.2f} ({g2.min():.2f} - {g2.max():.2f})"
-            val3 = f"{g3.median():.2f} ({g3.min():.2f} - {g3.max():.2f})"
+            # --- NON-PARAMETRİK (Median [Min-Max]) ---
+            for g, data in zip(valid_groups, groups_data):
+                row[col_names[g]] = f"{data.median():.2f} ({data.min():.2f} - {data.max():.2f})"
+            
             try:
-                _, p_val = kruskal(g1, g2, g3)
-                test_desc = "Kruskal-Wallis (Med[Min-Max])"
+                # Dinamik argüman aktarımı (*) ile Kruskal-Wallis
+                _, p_val = kruskal(*groups_data)
+                test_desc = "Kruskal-Wallis"
             except:
                 p_val = 1.0
                 test_desc = "Hata"
 
         p_text = "< 0.001" if p_val < 0.001 else f"{p_val:.3f}"
-            
-        results.append({
-            "Parametre": p,
-            col_name_1: val1,
-            col_name_2: val2,
-            col_name_3: val3,
-            "P Değeri": p_text,
-            "Metod": test_desc
-        })
+        row["P Değeri"] = p_text
+        row["Metod"] = test_desc
+        
+        results.append(row)
         
     return pd.DataFrame(results)
     
@@ -526,32 +552,66 @@ df = clean_dataframe(df_raw)
 # İndeks Hesaplama
 df = calculate_derived_indices(df)
 
-# Yaş Gruplama
+# 1. Yaş Grupları
 if "HASTA_YAS" in df.columns:
     df = segment_age_groups(df)
 
-# ---------------------------------------------------------
-# ADIM 2: İSTATİSTİK TABLOSUNU ÇAĞIR (ARTIK df HAZIR)
-# ---------------------------------------------------------
+# 2. Klinik Gruplar (B12 ve Vit D) - YENİ EKLENDİ
+df = segment_clinical_groups(df)
+
+# -----------------------------
+# İSTATİSTİK TABLOSU GÖSTERİMİ
+# -----------------------------
+st.divider()
+st.header("📋 Detaylı Klinik İstatistikler")
+
+# Analiz edilecek tüm parametreler (B12 ve Vit D buraya EKLENDİ)
+target_params = [
+    "B12", "VİTAMİN D", # <-- İsteğiniz üzerine eklendi
+    "WBC", "HGB", "HCT", "MCV", "PLT", "NE#", "LY#", "MO#", "EO#", "BA#", 
+    "RDW-CV", "RDW-SD", "MPV", "PCT", "PDW",
+    "NLR", "PLR", "LMR", "SII", "SIRI", "AISI", "Mentzer"
+]
+present_params = [p for p in target_params if p in df.columns]
+
+# Kullanıcıya Hangi Gruplamayı İstediğini Sor
+group_options = {}
 if "Yas_Grubu" in df.columns:
-    # Senin verdiğin tam liste üzerinden kontrol yapıyoruz
-    target_params = [
-        "WBC", "HGB", "HCT", "MCV", "PLT", "NE#", "LY#", "MO#", "EO#", "BA#", 
-        "RDW-CV", "RDW-SD", "MPV", "PCT", "PDW", # Rutinler
-        "NLR", "PLR", "LMR", "SII", "SIRI", "AISI", "Mentzer" # Hesaplananlar
-    ]
-    # Sadece veri setinde OLANLARI al (Hata almamak için)
-    present_params = [p for p in target_params if p in df.columns]
+    group_options["Yaş Grupları (Okul Öncesi vs.)"] = "Yas_Grubu"
+if "B12_Grubu" in df.columns:
+    group_options["B12 Durumu (Düşük/Normal/Yüksek)"] = "B12_Grubu"
+if "VitD_Grubu" in df.columns:
+    group_options["Vitamin D Durumu (Eksik/Yeterli)"] = "VitD_Grubu"
+
+if group_options:
+    selected_label = st.radio("Tablo Gruplama Kriteri Seçiniz:", list(group_options.keys()), horizontal=True)
+    selected_group_col = group_options[selected_label]
     
-    # FORCE PARAMETRIC DEĞERİNİ BURAYA GÖNDERİYORUZ
-    stat_table = generate_stat_table_advanced(df, "Yas_Grubu", present_params, force_parametric=force_para)
+    st.info(f"Aşağıdaki tablo **{selected_label}** kriterine göre oluşturulmuştur.")
+    
+    # Tabloyu oluştur
+    stat_table = generate_stat_table_advanced(df, selected_group_col, present_params, force_parametric=force_para)
     
     if not stat_table.empty:
         st.dataframe(stat_table, use_container_width=True, hide_index=True)
+        
+        # CSV İndir
+        def convert_df(d):
+            return d.to_csv(index=False, sep=";").encode('utf-8-sig')
+        
+        csv_name = f"istatistik_{selected_group_col}.csv"
+        st.download_button(
+            label="Tabloyu İndir (CSV)",
+            data=convert_df(stat_table),
+            file_name=csv_name,
+            mime="text/csv"
+        )
+    else:
+        st.warning("Seçilen grup için yeterli veri bulunamadı.")
+else:
+    st.warning("Gruplama yapılabilecek veri (Yaş, B12 veya Vit D) bulunamadı.")
 
-    
-
-
+st.divider()
 st.caption("Not: Bu uygulama klinik karar aracı değildir; araştırma/hipotez amaçlıdır.")
 
 if uploaded is None:
