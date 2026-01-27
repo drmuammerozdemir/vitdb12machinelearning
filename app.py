@@ -575,3 +575,28 @@ with tab2:
                 st.warning("Veri yetersiz.")
         else: 
             st.error("Seçilen hedef sütun veride bulunamadı.")
+            # --- TAB 2 İÇİNE EKLENECEK KOD (Mevcut kodların altına) ---
+    st.divider()
+    st.subheader("🤖 Çok Değişkenli Model (Logistic Regression)")
+    st.info("Bu modül, SII, MCV, HGB gibi parametreleri matematiksel olarak en iyi şekilde birleştirerek AUC'yi maksimize etmeye çalışır.")
+    
+    multi_features = st.multiselect(
+        "Modele dahil edilecek parametreleri seçin:", 
+        options=present_params,
+        default=["SII", "MCV", "HGB", "RDW-CV"] if "RDW-CV" in present_params else ["SII", "MCV"]
+    )
+    
+    if st.button("Kombine Model Oluştur"):
+        if len(multi_features) < 2:
+            st.warning("En az 2 parametre seçmelisiniz.")
+        else:
+            model_res, model_fig = perform_multivariate_roc(df_analysis, target_col, threshold, multi_features)
+            if model_fig:
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.metric("Model Başarısı (AUC)", model_res.split(": ")[1])
+                    st.success("Bu skor, seçilen parametrelerin birlikte kullanılmasıyla ulaşılan en yüksek teorik başarıdır.")
+                with col2:
+                    st.pyplot(model_fig)
+            else:
+                st.error(model_res)
