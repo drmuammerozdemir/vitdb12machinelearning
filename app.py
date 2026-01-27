@@ -8,7 +8,7 @@ import re
 import os
 import csv
 from io import StringIO, BytesIO
-from scipy.stats import kruskal, f_oneway
+from scipy.stats import kruskal, f_oneway, shapiro
 
 import numpy as np
 import pandas as pd
@@ -311,54 +311,89 @@ def segment_age_groups(df: pd.DataFrame) -> pd.DataFrame:
     df['Yas_Grubu'] = np.select(conditions, choices, default='Diğer')
     return df
 
-def generate_stat_table(df: pd.DataFrame, groups_col: str, params: list):
+def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list):
     """
-    Belirtilen parametreler için tanımlayıcı istatistik tablosu oluşturur.
-    Format: Median (Min - Max)
-    Test: Kruskal-Wallis (Non-parametrik dağılım varsayımı ile - Biyolojik veriler genelde böyledir)
+    1. Sütun başlıklarını (n sayılarını) en baştaki toplam grup sayısına göre sabitler.
+    2. Her parametre için Shapiro-Wilk testi uygular.
+       - Normal Dağılım -> Ortalama ± SS (ANOVA)
+       - Normal Değil -> Medyan (Min - Max) (Kruskal-Wallis)
     """
     results = []
     
-    # Sadece grupları olan veriyi al (Diğer hariç)
+    # Grupları Tanımla
     valid_groups = ['Okul Öncesi (0-5)', 'Okul Çağı (6-11)', 'Adolesan (12-17)']
-    df_stat = df[df[groups_col].isin(valid_groups)].copy()
     
+    # 1. ADIM: Başlıkları ve n Sayılarını SABİTLE (Kaymayı önler)
+    group_counts = df[groups_col].value_counts()
+    
+    n1 = group_counts.get(valid_groups[0], 0)
+    n2 = group_counts.get(valid_groups[1], 0)
+    n3 = group_counts.get(valid_groups[2], 0)
+    
+    col_name_1 = f"{valid_groups[0]} (n={n1})"
+    col_name_2 = f"{valid_groups[1]} (n={n2})"
+    col_name_3 = f"{valid_groups[2]} (n={n3})"
+    
+    # Veriyi filtrele
+    df_stat = df[df[groups_col].isin(valid_groups)].copy()
+
     for p in params:
         if p not in df_stat.columns:
             continue
             
-        # Boşları at
         clean_col = df_stat.dropna(subset=[p])
-        
-        # Gruplara ayır
         g1 = clean_col[clean_col[groups_col] == valid_groups[0]][p]
         g2 = clean_col[clean_col[groups_col] == valid_groups[1]][p]
         g3 = clean_col[clean_col[groups_col] == valid_groups[2]][p]
         
-        # Eğer gruplardan birinde veri yoksa atla
-        if len(g1) < 2 or len(g2) < 2 or len(g3) < 2:
+        # Yetersiz veri varsa atla (En az 3 veri gerekli Shapiro için)
+        if len(g1) < 3 or len(g2) < 3 or len(g3) < 3:
             continue
             
-        # İstatistik Hesapla: Median (Min - Max)
-        def fmt(series):
-            return f"{series.median():.2f} ({series.min():.2f} - {series.max():.2f})"
-        
-        # Test: Kruskal-Wallis
+        # 2. ADIM: Shapiro-Wilk Normallik Testi
         try:
-            stat, p_val = kruskal(g1, g2, g3)
-            p_text = "< 0.001" if p_val < 0.001 else f"{p_val:.3f}"
+            _, p1 = shapiro(g1)
+            _, p2 = shapiro(g2)
+            _, p3 = shapiro(g3)
+            # Tüm gruplar normalse (p > 0.05) Parametrik seç
+            is_normal = (p1 > 0.05) and (p2 > 0.05) and (p3 > 0.05)
         except:
-            p_text = "N/A"
+            is_normal = False
             
-        row = {
+        # 3. ADIM: Değerleri Yazdır
+        if is_normal:
+            # --- PARAMETRİK (Ortalama ± SS) ---
+            val1 = f"{g1.mean():.2f} ± {g1.std():.2f}"
+            val2 = f"{g2.mean():.2f} ± {g2.std():.2f}"
+            val3 = f"{g3.mean():.2f} ± {g3.std():.2f}"
+            try:
+                _, p_val = f_oneway(g1, g2, g3)
+                test_desc = "Parametrik (ANOVA)"
+            except:
+                p_val = 1.0
+                test_desc = "Hata"
+        else:
+            # --- NON-PARAMETRİK (Medyan (Min - Max)) ---
+            val1 = f"{g1.median():.2f} ({g1.min():.2f} - {g1.max():.2f})"
+            val2 = f"{g2.median():.2f} ({g2.min():.2f} - {g2.max():.2f})"
+            val3 = f"{g3.median():.2f} ({g3.min():.2f} - {g3.max():.2f})"
+            try:
+                _, p_val = kruskal(g1, g2, g3)
+                test_desc = "Non-Param. (Kruskal-Wallis)"
+            except:
+                p_val = 1.0
+                test_desc = "Hata"
+
+        p_text = "< 0.001" if p_val < 0.001 else f"{p_val:.3f}"
+            
+        results.append({
             "Parametre": p,
-            f"{valid_groups[0]} (n={len(g1)})": fmt(g1),
-            f"{valid_groups[1]} (n={len(g2)})": fmt(g2),
-            f"{valid_groups[2]} (n={len(g3)})": fmt(g3),
+            col_name_1: val1,
+            col_name_2: val2,
+            col_name_3: val3,
             "P Değeri": p_text,
-            "Test Metodu": "Kruskal-Wallis"
-        }
-        results.append(row)
+            "Dağılım / Test": test_desc
+        })
         
     return pd.DataFrame(results)
     
@@ -477,43 +512,35 @@ if "HASTA_YAS" in df.columns:
     df = segment_age_groups(df)
 
 st.divider()
-st.header("📋 Klinik İstatistikler ve İndeksler")
-st.info("Bu bölüm, 0-17 yaş arası pediatrik popülasyon için tanımlayıcı istatistikleri (Median [Min-Max]) ve grup karşılaştırmalarını içerir.")
+st.header("📋 Klinik İstatistikler (Otomatik Dağılım Analizi)")
+st.info("Her parametre için **Shapiro-Wilk** testi uygulanır. Dağılım normalse **Ortalama ± SS**, değilse **Medyan (Min-Max)** gösterilir.")
 
-# Gruplama var mı kontrol et
 if "Yas_Grubu" in df.columns:
-    # İlgilenilen Parametreler
-    # Hemogram ana parametreleri + Yeni hesaplananlar
     target_params = [
-        "WBC", "HGB", "HCT", "MCV", "PLT", "NE#", "LY#", "MO#", "EO#", "BA#", # Rutin
-        "RDW-CV", "MPV", # İkincil
-        "NLR", "PLR", "LMR", "SII", "SIRI", "Mentzer" # Hesaplanan İndeksler
+        "WBC", "HGB", "HCT", "MCV", "PLT", "NE#", "LY#", "MO#", "EO#", "BA#", 
+        "RDW-CV", "MPV", "NLR", "PLR", "LMR", "SII", "SIRI", "Mentzer"
     ]
-    
-    # Sadece veri setinde mevcut olanları al
     present_params = [p for p in target_params if p in df.columns]
     
-    # Tabloyu Oluştur
-    stat_table = generate_stat_table(df, "Yas_Grubu", present_params)
+    # YENİ FONKSİYONU ÇAĞIRIYORUZ
+    stat_table = generate_stat_table_advanced(df, "Yas_Grubu", present_params)
     
     if not stat_table.empty:
         st.dataframe(stat_table, use_container_width=True, hide_index=True)
-        st.caption("**Not:** Veriler *Medyan (Minimum - Maksimum)* olarak sunulmuştur. Gruplar arası fark *Kruskal-Wallis* testi ile analiz edilmiştir.")
         
-        # İndirme Butonu (Excel Olarak)
         def convert_df(d):
             return d.to_csv(index=False, sep=";").encode('utf-8-sig')
 
         st.download_button(
             label="İstatistik Tablosunu İndir (CSV)",
             data=convert_df(stat_table),
-            file_name="klinik_istatistikler.csv",
-            mime="text/csv",
+            file_name="klinik_istatistik_shapiro.csv",
+            mime="text/csv"
         )
     else:
-        st.warning("İstatistik oluşturmak için yeterli veri veya uygun yaş grubu (0-17) bulunamadı.")
+        st.warning("Veri yok veya yaş grupları uygun değil.")
 else:
-    st.warning("Yaş sütunu (HASTA_YAS) bulunamadığı için gruplama yapılamadı.")
+    st.warning("Yaş verisi bulunamadı.")
 
 st.divider()
 # ... (Buradan itibaren mevcut ML kodlarınız devam edebilir: st.header("Model") vs.) ...
