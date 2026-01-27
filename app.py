@@ -10,6 +10,7 @@ import csv
 from io import StringIO, BytesIO
 # İstatistik kütüphaneleri
 from scipy.stats import kruskal, f_oneway, shapiro
+from sklearn.metrics import roc_curve, auc
 
 
 # --- GRAFİK İÇİN GEREKLİ KÜTÜPHANELER (YENİ EKLENDİ) ---
@@ -211,71 +212,102 @@ def plot_correlation_heatmap(df, cols):
     ax.set_title("Spearman Korelasyon Matrisi", fontsize=14, fontweight='bold')
     return fig
 
-# --- ROC ANALİZİ FONKSİYONU ---
-def perform_roc_analysis(df, target_vitamin, threshold, feature_cols, condition_type='less'):
-    """
-    Belirli bir vitamin eksikliğini (Target) tahmin etmede 
-    hemogram parametrelerinin başarısını (AUC) hesaplar.
-    
-    condition_type='less': Target < threshold ise 'Eksiklik Var (1)' kabul edilir.
-    """
+# --- YENİ: GELİŞMİŞ ROC ANALİZİ (PPV, NPV, CUT-OFF) ---
+def perform_advanced_roc(df, target_vitamin, threshold, feature_cols, condition_type='less'):
     results = []
-    
-    # Veri Hazırlığı
     temp_df = df.dropna(subset=[target_vitamin] + feature_cols).copy()
     if temp_df.empty: return None, None
     
-    # Binary Hedef Oluştur (1: Hasta/Eksik, 0: Sağlam)
-    if condition_type == 'less':
-        y_true = (temp_df[target_vitamin] < threshold).astype(int)
-    else:
-        y_true = (temp_df[target_vitamin] > threshold).astype(int)
-        
-    # Sınıf dağılımı kontrolü (Sadece 0 veya Sadece 1 varsa ROC çizilemez)
-    if len(np.unique(y_true)) < 2:
-        return "Tek sınıf hatası", None
+    # Binary Hedef (1: Hasta, 0: Sağlam)
+    if condition_type == 'less': y_true = (temp_df[target_vitamin] < threshold).astype(int)
+    else: y_true = (temp_df[target_vitamin] > threshold).astype(int)
+    
+    if len(np.unique(y_true)) < 2: return "Tek sınıf hatası", None
 
-    # Grafik Hazırlığı
     fig, ax = plt.subplots(figsize=(10, 8))
     
-    # Her bir özellik için tek tek ROC hesapla
     for feature in feature_cols:
         y_score = temp_df[feature]
-        
-        # ROC Hesapla
-        fpr, tpr, _ = roc_curve(y_true, y_score)
+        fpr, tpr, thresholds = roc_curve(y_true, y_score)
         roc_auc = auc(fpr, tpr)
         
-        # Eğer AUC < 0.5 ise (Ters ilişki), skoru ters çevirip tekrar hesapla
-        # Örn: B12 düştükçe MCV artar. MCV için AUC yüksek çıkmalı.
-        # Ancak HGB düşebilir. Bu durumda AUC < 0.5 çıkar. 
-        # Klinikte 'tanısal güç' önemlidir, yönü farketmeksizin AUC > 0.5 görmek isteriz.
+        # Youden Index ile En İyi Cut-off Bulma (J = Sensitivity + Specificity - 1)
+        # Eğer AUC < 0.5 ise ters ilişki vardır, skorları ters çevirip tekrar hesapla
+        reversed_score = False
         if roc_auc < 0.5:
-            fpr, tpr, _ = roc_curve(y_true, -y_score) # Skoru ters çevir
+            fpr, tpr, thresholds = roc_curve(y_true, -y_score)
             roc_auc = auc(fpr, tpr)
-            label = f"{feature} (Inverse) (AUC = {roc_auc:.3f})"
-        else:
-            label = f"{feature} (AUC = {roc_auc:.3f})"
+            reversed_score = True
             
-        results.append({"Parametre": feature, "AUC": roc_auc})
+        # Optimal Nokta
+        J = tpr - fpr
+        ix = np.argmax(J)
+        best_thresh = thresholds[ix]
         
-        # Sadece AUC değeri 0.55'ten büyük olanları çiz (Grafiği boğmamak için) veya en iyi 5'i
-        if roc_auc > 0.55:
-            ax.plot(fpr, tpr, label=label)
+        # Eğer skor ters çevrildiyse eşik değeri de negatiften pozitife dönmeli
+        # Ancak roc_curve fonksiyonu ters skor için threshold ürettiği için, orijinal verideki karşılığını bulmalıyız.
+        # Basitlik adına: Threshold'u bulduktan sonra confusion matrix'i o noktada hesaplıyoruz.
+        
+        if reversed_score:
+            # Ters ilişkide: Feature değeri DÜŞTÜKÇE risk artar. 
+            # roc_curve -y_score kullandı. best_thresh aslında -1 * gerçek_değer.
+            real_threshold = -best_thresh
+            y_pred = (y_score <= real_threshold).astype(int)
+            cut_off_desc = f"≤ {real_threshold:.2f}"
+        else:
+            # Düz ilişkide: Feature değeri ARTTIKÇA risk artar.
+            real_threshold = best_thresh
+            y_pred = (y_score >= real_threshold).astype(int)
+            cut_off_desc = f"≥ {real_threshold:.2f}"
 
-    # Referans çizgisi
+        # Confusion Matrix Metrics
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        
+        sens = tp / (tp + fn) if (tp+fn) > 0 else 0
+        spec = tn / (tn + fp) if (tn+fp) > 0 else 0
+        ppv = tp / (tp + fp) if (tp+fp) > 0 else 0
+        npv = tn / (tn + fn) if (tn+fn) > 0 else 0
+        
+        # P Değeri (Mann-Whitney U: Hasta vs Sağlam grubun değerleri farklı mı?)
+        group_sick = temp_df[y_true == 1][feature]
+        group_healthy = temp_df[y_true == 0][feature]
+        _, mw_p = mannwhitneyu(group_sick, group_healthy)
+        p_text = "< 0.001" if mw_p < 0.001 else f"{mw_p:.3f}"
+
+        label = f"{feature} (AUC={roc_auc:.3f})"
+        results.append({
+            "Parametre": feature,
+            "AUC": roc_auc,
+            "Optimal Cut-off": cut_off_desc,
+            "Sensitivity": f"{sens:.2%}",
+            "Specificity": f"{spec:.2%}",
+            "PPV (+)": f"{ppv:.2%}",
+            "NPV (-)": f"{npv:.2%}",
+            "P Değeri": p_text
+        })
+        
+        if roc_auc > 0.55: ax.plot(fpr, tpr, label=label)
+
     ax.plot([0, 1], [0, 1], 'k--', lw=2)
-    ax.set_xlim([0.0, 1.0])
-    ax.set_ylim([0.0, 1.05])
-    ax.set_xlabel('False Positive Rate (1 - Specificity)')
-    ax.set_ylabel('True Positive Rate (Sensitivity)')
-    ax.set_title(f'{target_vitamin} Eksikliği (<{threshold}) İçin ROC Eğrileri')
+    ax.set_xlim([0.0, 1.0]); ax.set_ylim([0.0, 1.05])
+    ax.set_xlabel('1 - Specificity (False Positive Rate)')
+    ax.set_ylabel('Sensitivity (True Positive Rate)')
+    ax.set_title(f'{target_vitamin} Eksikliği Tanısal Performans (ROC)')
     ax.legend(loc="lower right")
     
-    # Sonuç Tablosu
-    res_df = pd.DataFrame(results).sort_values("AUC", ascending=False)
-    
-    return res_df, fig
+    return pd.DataFrame(results).sort_values("AUC", ascending=False), fig
+
+@st.cache_data(show_spinner=False)
+def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
+    ext = os.path.splitext(filename.lower())[1]
+    if ext in [".xlsx", ".xls"]:
+        try: return pd.read_excel(BytesIO(file_bytes)), "excel", None
+        except Exception as e: raise ValueError(f"Excel hatası: {e}")
+    text = file_bytes.decode(encoding, errors="replace")
+    try: sep = csv.Sniffer().sniff(text[:20000], delimiters=[",", ";", "\t", "|"]).delimiter
+    except: sep = user_sep if user_sep else ";"
+    bad_lines = []
+    return pd.read_csv(StringIO(text), sep=sep, engine="python", on_bad_lines=lambda l: bad_lines.append(l) or None), f"csv(sep='{sep}')", bad_lines
 
 # -----------------------------
 # UI (ARAYÜZ)
@@ -343,82 +375,97 @@ if group_options:
 # ... (Önceki grafik kodlarının bitişi) ...
 
 # -----------------------------
-# EK ANALİZLER: KORELASYON & ROC
+# İLERİ ANALİZLER: KORELASYON & ROC (GÜNCELLENMİŞ HALİ)
 # -----------------------------
 st.divider()
 st.header("🔍 İleri Analizler: Korelasyon ve ROC")
 
+# --- 1. ADIM: FİLTRELEME KUTUSU (YENİ EKLENDİ) ---
+# Varsayılan analiz verisi tüm veri setidir
+df_analysis = df.copy()
+
+if "Yas_Grubu" in df.columns:
+    # Mevcut yaş gruplarını al
+    available_groups = sorted([g for g in df["Yas_Grubu"].unique() if pd.notna(g) and str(g) != 'Diğer'])
+    
+    st.markdown("Analize dahil edilecek hasta gruplarını seçin (Varsayılan: Hepsi):")
+    selected_age_groups = st.multiselect(
+        "Yaş Grubu Filtresi:",
+        options=available_groups,
+        default=available_groups # Başlangıçta hepsi seçili gelir
+    )
+    
+    # Seçime göre veriyi filtrele
+    if selected_age_groups:
+        df_analysis = df[df["Yas_Grubu"].isin(selected_age_groups)].copy()
+        st.caption(f"**Analiz edilen hasta sayısı:** {len(df_analysis)} (Seçilen Gruplar: {', '.join(selected_age_groups)})")
+    else:
+        st.error("Lütfen en az bir yaş grubu seçin.")
+        st.stop() # Seçim yoksa analizi durdur
+
+# --- 2. ADIM: SEKME YAPISI ---
 tab1, tab2 = st.tabs(["🔥 Korelasyon Heatmap", "🎯 ROC Analizi (Tanısal Güç)"])
 
 # --- TAB 1: HEATMAP ---
 with tab1:
     st.markdown("Seçilen parametreler arasındaki ilişkiyi (Spearman Korelasyonu) gösterir.")
-    
-    # Varsayılan olarak mantıklı parametreleri seçelim
     default_cols = ["B12", "VİTAMİN D", "HGB", "MCV", "WBC", "PLT", "NE#", "LY#", "NLR"]
-    valid_defaults = [c for c in default_cols if c in df.columns]
+    valid_defaults = [c for c in default_cols if c in df_analysis.columns] # df yerine df_analysis kullanıyoruz
     
     selected_corr_cols = st.multiselect(
-        "Korelasyon haritasına dahil edilecek parametreleri seçin:",
-        options=present_params,
+        "Heatmap parametrelerini seçin:", 
+        options=present_params, 
         default=valid_defaults
     )
     
     if st.button("Heatmap Oluştur"):
         with st.spinner("Matris hesaplanıyor..."):
-            fig_corr = plot_correlation_heatmap(df, selected_corr_cols)
-            if fig_corr:
+            # DİKKAT: Fonksiyona artık df_analysis gönderiyoruz
+            fig_corr = plot_correlation_heatmap(df_analysis, selected_corr_cols)
+            if fig_corr: 
                 st.pyplot(fig_corr)
-            else:
-                st.warning("Yeterli veri seçilmedi.")
+            else: 
+                st.warning("Yeterli veri seçilmedi veya korelasyon hesaplanamadı.")
 
 # --- TAB 2: ROC ANALİZİ ---
 with tab2:
-    st.markdown("""
-    Bu modül, hemogram parametrelerinin **Vitamin Eksikliğini** tespit etme başarısını (AUC) ölçer.
-    * **AUC yakşalık 1.0:** Mükemmel ayırıcı.
-    * **AUC yaklaşık 0.5:** Yazı-tura (Ayırt ediciliği yok).
-    """)
+    st.markdown("Hemogram parametrelerinin **Vitamin Eksikliğini** tespit etme başarısını (AUC) ölçer.")
     
     c1, c2 = st.columns(2)
     roc_target = c1.selectbox("Hangi eksiklik analiz edilecek?", ["B12 Eksikliği", "D Vitamini Eksikliği"])
     
-    # Eşik Değerler (Kullanıcı değiştirebilsin)
     if roc_target == "B12 Eksikliği":
         target_col = "B12"
         threshold = c2.number_input("B12 Eksiklik Sınırı (pg/mL)", value=200)
     else:
         target_col = "VİTAMİN D"
         threshold = c2.number_input("Vit D Eksiklik Sınırı (ng/mL)", value=20)
-        
+    
+    available_features = [p for p in present_params if p not in ["B12", "VİTAMİN D"]]
+    
     roc_features = st.multiselect(
-        "Tanısal gücü test edilecek parametreler:",
-        options=[p for p in present_params if p not in ["B12", "VİTAMİN D"]], # Hedefin kendisini çıkar
-        default=["MCV", "HGB", "WBC", "NE#", "LY#", "NLR", "PLR"] # Örnek varsayılanlar
+        "Test edilecek parametreler:", 
+        options=available_features, 
+        default=["MCV", "HGB", "WBC", "NE#", "LY#", "NLR", "PLR"] if "MCV" in available_features else available_features[:3]
     )
     
     if st.button("ROC Analizini Çalıştır"):
-        if target_col in df.columns and roc_features:
-            res_df, fig_roc = perform_roc_analysis(df, target_col, threshold, roc_features)
+        # DİKKAT: Kontrolü df_analysis üzerinden yapıyoruz
+        if target_col in df_analysis.columns and roc_features:
+            # Fonksiyona df yerine df_analysis gönderiyoruz
+            res_df, fig_roc = perform_roc_analysis(df_analysis, target_col, threshold, roc_features)
             
-            if isinstance(res_df, str): # Hata mesajı döndüyse
-                st.error(f"Hata: {res_df} (Veri setinde sadece 'Hasta' veya sadece 'Sağlam' kişiler olabilir).")
+            if isinstance(res_df, str): 
+                st.error(f"Hata: {res_df} (Seçilen yaş grubunda sadece 'Hasta' veya sadece 'Sağlam' kişiler kalmış olabilir).")
             elif res_df is not None:
                 col_left, col_right = st.columns([1, 2])
-                
                 with col_left:
                     st.write("**AUC Skor Tablosu**")
                     st.dataframe(res_df, use_container_width=True, hide_index=True)
-                
                 with col_right:
                     st.pyplot(fig_roc)
-                    st.caption("Not: Ters ilişki gösteren parametreler (örn. B12 düşerken artanlar) otomatik olarak düzeltilmiştir.")
-            else:
+                    st.caption("Not: Ters ilişki gösteren parametreler otomatik düzeltilmiştir.")
+            else: 
                 st.warning("Veri yetersiz.")
-        else:
+        else: 
             st.error("Seçilen hedef sütun veride bulunamadı.")
-                    st.caption(f"**Grafik Notu:** {graph_param} parametresinin {selected_label} gruplarına göre dağılımı. Siyah çizgiler %95 Güven Aralığını gösterir.")
-                else: st.warning("Grafik için yeterli veri yok.")
-    else: st.warning("Yeterli veri yok.")
-else: st.warning("Gruplama verisi bulunamadı.")
-
