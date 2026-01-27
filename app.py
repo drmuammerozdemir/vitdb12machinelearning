@@ -441,9 +441,9 @@ def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep
 
 
 # -----------------------------
-# UI
+# UI (ARAYÜZ) - SIDEBAR DÜZELTİLMİŞ HALİ
 # -----------------------------
-st.title("Hemogram ile B12 ve Vitamin D Tahmini (Regresyon)")
+st.title("Hemogram -> B12 ve Vitamin D Tahmini (Regresyon)")
 
 with st.sidebar:
     st.header("Veri")
@@ -455,7 +455,7 @@ with st.sidebar:
     encoding = st.selectbox("Encoding", ["utf-8", "utf-8-sig", "cp1254", "latin1"], index=1)
 
     st.divider()
-    st.header("Model")
+    st.header("Model Ayarları")
     seed = st.number_input("Random seed", value=42, step=1)
     test_size = st.slider("Test oranı", 0.1, 0.4, 0.2, 0.05)
 
@@ -465,28 +465,26 @@ with st.sidebar:
         "XGBoost (if installed)", "LightGBM (if installed)", "CatBoost (if installed)"
     ]
     model_name = st.selectbox("Model seç", available_models, index=6)
-    scale_numeric = st.checkbox("Sayısal değişkenleri ölçekle (Linear modeller için iyi)", value=False)
+    scale_numeric = st.checkbox("Sayısal değişkenleri ölçekle", value=False)
 
     st.divider()
-    st.header("Hedef & Özellikler")
+    st.header("Analiz ve İstatistik")
+    
+    # --- DÜZELTME: Hedef seçimi ve Force Parametric burada tek seferde tanımlanıyor ---
     target_choice = st.radio("Hedef", ["B12", "VİTAMİN D"], index=0)
-    do_multitarget = st.checkbox("İkisini aynı anda değerlendir (B12 + Vit D raporu)", value=True)
+    
+    # Yeni eklediğimiz özellik:
+    force_para = st.checkbox("Normallik Testini Yoksay (Hepsini Mean ± SD Ver)", value=False)
+    
+    do_multitarget = st.checkbox("Çoklu Hedef Raporu (İkisini de analiz et)", value=True)
 
     st.divider()
     st.header("Değerlendirme")
     cv_folds = st.slider("CV fold", 3, 10, 5, 1)
-    # Varsayılanı kapalı yapıyoruz, kullanıcı isterse açsın (Hata önlemek için)
-    do_perm_importance = st.checkbox("Permutation importance hesapla (Dikkat: Yavaş ve RAM tüketir)", value=False)
-    perm_repeats = st.slider("Permutation tekrar", 2, 10, 5, 1) # Varsayılanı 5'e düşürdük
-    
-    st.divider()
-    st.header("Ayarlar")
-    
-    # BU KUTUYU EKLE
-    force_para = st.checkbox("Normallik Testini Yoksay (Hepsini Mean ± SD Ver)", value=False)
-    
-    target_choice = st.radio("Hedef", ["B12", "VİTAMİN D"], index=0)
-    # ... (diğer ayarlar) ...
+    do_perm_importance = st.checkbox("Permutation importance hesapla", value=False)
+    perm_repeats = st.slider("Permutation tekrar", 2, 10, 5, 1)
+
+st.caption("Not: Bu uygulama klinik karar aracı değildir; araştırma/hipotez amaçlıdır.")
 
 
 # --- MAIN KISMI (İstatistik Tablosunu Çağırma) ---
