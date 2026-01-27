@@ -8,6 +8,7 @@ import re
 import os
 import csv
 from io import StringIO, BytesIO
+from scipy.stats import kruskal, f_oneway
 
 import numpy as np
 import pandas as pd
@@ -232,7 +233,135 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def calculate_derived_indices(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Hemogram parametrelerinden türetilmiş indeksleri hesaplar.
+    (Sıfıra bölünme hatalarını np.nan ile engeller)
+    """
+    df = df.copy()
+    
+    # Gerekli sütunların varlığını kontrol et (Normalize edilmiş isimlerle)
+    # Genelde: NE#, LY#, MO#, PLT, RBC, MCV
+    
+    # Yardımcı lambda: Güvenli bölme
+    safe_div = lambda a, b: a / b if b != 0 else np.nan
 
+    # Vektörel işlem için numpy kullanımı daha hızlıdır
+    ne = df.get("NE#", np.nan)
+    ly = df.get("LY#", np.nan)
+    mo = df.get("MO#", np.nan)
+    plt = df.get("PLT", np.nan)
+    rbc = df.get("RBC", np.nan)
+    mcv = df.get("MCV", np.nan)
+    rdw = df.get("RDW-CV", np.nan) # Veya RDW-SD
+
+    # 1. NLR (Neutrophil-to-Lymphocyte Ratio)
+    if "NLR" not in df.columns and "NE#" in df.columns and "LY#" in df.columns:
+        df["NLR"] = ne / ly
+
+    # 2. PLR (Platelet-to-Lymphocyte Ratio)
+    if "PLR" not in df.columns and "PLT" in df.columns and "LY#" in df.columns:
+        df["PLR"] = plt / ly
+
+    # 3. LMR (Lymphocyte-to-Monocyte Ratio)
+    if "LMR" not in df.columns and "LY#" in df.columns and "MO#" in df.columns:
+        df["LMR"] = ly / mo
+
+    # 4. SII (Systemic Immune-Inflammation Index) = (PLT x NE) / LY
+    if "SII" not in df.columns and "PLT" in df.columns and "NE#" in df.columns and "LY#" in df.columns:
+        df["SII"] = (plt * ne) / ly
+
+    # 5. SIRI (Systemic Inflammation Response Index) = (NE x MO) / LY
+    if "SIRI" not in df.columns and "NE#" in df.columns and "MO#" in df.columns and "LY#" in df.columns:
+        df["SIRI"] = (ne * mo) / ly
+        
+    # 6. AISI (Aggregate Index of Systemic Inflammation) = (NE x PLT x MO) / LY
+    if "AISI" not in df.columns and "NE#" in df.columns and "PLT" in df.columns and "MO#" in df.columns:
+        df["AISI"] = (ne * plt * mo) / ly
+
+    # 7. Mentzer Index (Talasemi Taraması) = MCV / RBC (<13 Talasemi, >13 Demir Eksikliği)
+    if "Mentzer" not in df.columns and "MCV" in df.columns and "RBC" in df.columns:
+        df["Mentzer"] = mcv / rbc
+
+    # Sonsuz değerleri (inf) NaN yapalım
+    df = df.replace([np.inf, -np.inf], np.nan)
+    
+    return df
+
+def segment_age_groups(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    HASTA_YAS sütununa göre pediyatrik gruplama yapar.
+    0-5: Okul Öncesi
+    6-11: Okul Çağı
+    12-17: Adolesan
+    """
+    if "HASTA_YAS" not in df.columns:
+        return df
+    
+    # cut fonksiyonunda bins aralıkları: (dahil değil, dahil] mantığıyla çalışır ama include_lowest=True ile ilkini de alırız.
+    # Ancak manuel mantık daha hatasız çalışır burada.
+    
+    conditions = [
+        (df['HASTA_YAS'] >= 0) & (df['HASTA_YAS'] <= 5),
+        (df['HASTA_YAS'] >= 6) & (df['HASTA_YAS'] <= 11),
+        (df['HASTA_YAS'] >= 12) & (df['HASTA_YAS'] <= 17)
+    ]
+    choices = ['Okul Öncesi (0-5)', 'Okul Çağı (6-11)', 'Adolesan (12-17)']
+    
+    df['Yas_Grubu'] = np.select(conditions, choices, default='Diğer')
+    return df
+
+def generate_stat_table(df: pd.DataFrame, groups_col: str, params: list):
+    """
+    Belirtilen parametreler için tanımlayıcı istatistik tablosu oluşturur.
+    Format: Median (Min - Max)
+    Test: Kruskal-Wallis (Non-parametrik dağılım varsayımı ile - Biyolojik veriler genelde böyledir)
+    """
+    results = []
+    
+    # Sadece grupları olan veriyi al (Diğer hariç)
+    valid_groups = ['Okul Öncesi (0-5)', 'Okul Çağı (6-11)', 'Adolesan (12-17)']
+    df_stat = df[df[groups_col].isin(valid_groups)].copy()
+    
+    for p in params:
+        if p not in df_stat.columns:
+            continue
+            
+        # Boşları at
+        clean_col = df_stat.dropna(subset=[p])
+        
+        # Gruplara ayır
+        g1 = clean_col[clean_col[groups_col] == valid_groups[0]][p]
+        g2 = clean_col[clean_col[groups_col] == valid_groups[1]][p]
+        g3 = clean_col[clean_col[groups_col] == valid_groups[2]][p]
+        
+        # Eğer gruplardan birinde veri yoksa atla
+        if len(g1) < 2 or len(g2) < 2 or len(g3) < 2:
+            continue
+            
+        # İstatistik Hesapla: Median (Min - Max)
+        def fmt(series):
+            return f"{series.median():.2f} ({series.min():.2f} - {series.max():.2f})"
+        
+        # Test: Kruskal-Wallis
+        try:
+            stat, p_val = kruskal(g1, g2, g3)
+            p_text = "< 0.001" if p_val < 0.001 else f"{p_val:.3f}"
+        except:
+            p_text = "N/A"
+            
+        row = {
+            "Parametre": p,
+            f"{valid_groups[0]} (n={len(g1)})": fmt(g1),
+            f"{valid_groups[1]} (n={len(g2)})": fmt(g2),
+            f"{valid_groups[2]} (n={len(g3)})": fmt(g3),
+            "P Değeri": p_text,
+            "Test Metodu": "Kruskal-Wallis"
+        }
+        results.append(row)
+        
+    return pd.DataFrame(results)
+    
 @st.cache_data(show_spinner=False)
 def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
     ext = os.path.splitext(filename.lower())[1]
@@ -336,6 +465,58 @@ if bad_lines:
     st.code("\n".join([str(x) for x in bad_lines[:2]]))
 
 df = clean_dataframe(df_raw)
+
+# ... (Dosya okuma ve clean_dataframe işlemleri bittikten hemen sonra) ...
+
+# 1. İndeks Hesaplama
+df = calculate_derived_indices(df)
+
+# 2. Yaş Gruplama (Sadece 0-17 yaş arası için)
+if "HASTA_YAS" in df.columns:
+    # Tüm veride hesaplama yapalım ama tabloyu filtreleyelim
+    df = segment_age_groups(df)
+
+st.divider()
+st.header("📋 Klinik İstatistikler ve İndeksler")
+st.info("Bu bölüm, 0-17 yaş arası pediatrik popülasyon için tanımlayıcı istatistikleri (Median [Min-Max]) ve grup karşılaştırmalarını içerir.")
+
+# Gruplama var mı kontrol et
+if "Yas_Grubu" in df.columns:
+    # İlgilenilen Parametreler
+    # Hemogram ana parametreleri + Yeni hesaplananlar
+    target_params = [
+        "WBC", "HGB", "HCT", "MCV", "PLT", "NE#", "LY#", "MO#", "EO#", "BA#", # Rutin
+        "RDW-CV", "MPV", # İkincil
+        "NLR", "PLR", "LMR", "SII", "SIRI", "Mentzer" # Hesaplanan İndeksler
+    ]
+    
+    # Sadece veri setinde mevcut olanları al
+    present_params = [p for p in target_params if p in df.columns]
+    
+    # Tabloyu Oluştur
+    stat_table = generate_stat_table(df, "Yas_Grubu", present_params)
+    
+    if not stat_table.empty:
+        st.dataframe(stat_table, use_container_width=True, hide_index=True)
+        st.caption("**Not:** Veriler *Medyan (Minimum - Maksimum)* olarak sunulmuştur. Gruplar arası fark *Kruskal-Wallis* testi ile analiz edilmiştir.")
+        
+        # İndirme Butonu (Excel Olarak)
+        def convert_df(d):
+            return d.to_csv(index=False, sep=";").encode('utf-8-sig')
+
+        st.download_button(
+            label="İstatistik Tablosunu İndir (CSV)",
+            data=convert_df(stat_table),
+            file_name="klinik_istatistikler.csv",
+            mime="text/csv",
+        )
+    else:
+        st.warning("İstatistik oluşturmak için yeterli veri veya uygun yaş grubu (0-17) bulunamadı.")
+else:
+    st.warning("Yaş sütunu (HASTA_YAS) bulunamadığı için gruplama yapılamadı.")
+
+st.divider()
+# ... (Buradan itibaren mevcut ML kodlarınız devam edebilir: st.header("Model") vs.) ...
 
 st.subheader("Veri Önizleme")
 st.write(df.head(10))
