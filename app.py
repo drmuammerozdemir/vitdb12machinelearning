@@ -9,8 +9,11 @@ import os
 import csv
 from io import StringIO, BytesIO
 # İstatistik kütüphaneleri
-from scipy.stats import kruskal, f_oneway, shapiro
-from sklearn.metrics import roc_curve, auc
+
+from scipy.stats import kruskal, f_oneway, shapiro, mannwhitneyu
+from sklearn.metrics import roc_curve, auc, confusion_matrix
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
 
 # --- GRAFİK İÇİN GEREKLİ KÜTÜPHANELER (YENİ EKLENDİ) ---
@@ -58,16 +61,55 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_derived_indices(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    ne = df.get("NE#", np.nan); ly = df.get("LY#", np.nan); mo = df.get("MO#", np.nan)
-    plt = df.get("PLT", np.nan); rbc = df.get("RBC", np.nan); mcv = df.get("MCV", np.nan)
     
-    if "NLR" not in df.columns and "NE#" in df.columns and "LY#" in df.columns: df["NLR"] = ne / ly
-    if "PLR" not in df.columns and "PLT" in df.columns and "LY#" in df.columns: df["PLR"] = plt / ly
-    if "LMR" not in df.columns and "LY#" in df.columns and "MO#" in df.columns: df["LMR"] = ly / mo
-    if "SII" not in df.columns and "PLT" in df.columns and "NE#" in df.columns and "LY#" in df.columns: df["SII"] = (plt * ne) / ly
-    if "SIRI" not in df.columns and "NE#" in df.columns and "MO#" in df.columns and "LY#" in df.columns: df["SIRI"] = (ne * mo) / ly
-    if "AISI" not in df.columns and "NE#" in df.columns and "PLT" in df.columns and "MO#" in df.columns: df["AISI"] = (ne * plt * mo) / ly
-    if "Mentzer" not in df.columns and "MCV" in df.columns and "RBC" in df.columns: df["Mentzer"] = mcv / rbc
+    # --- 1. DEĞİŞKENLERİ GÜVENLİ ŞEKİLDE ÇEK (HATA ÖNLEYİCİ) ---
+    # .get() metodu sütun yoksa hata vermek yerine NaN döndürür, kod patlamaz.
+    ne = df.get("NE#", np.nan)
+    ly = df.get("LY#", np.nan)
+    mo = df.get("MO#", np.nan)
+    plt_cnt = df.get("PLT", np.nan)
+    rbc = df.get("RBC", np.nan)
+    mcv = df.get("MCV", np.nan)
+    hgb = df.get("HGB", np.nan)
+    
+    # RDW değişkenini belirle (CV veya SD hangisi varsa)
+    rdw_val = np.nan
+    if "RDW-CV" in df.columns:
+        rdw_val = df["RDW-CV"]
+    elif "RDW-SD" in df.columns:
+        rdw_val = df["RDW-SD"]
+
+    # --- 2. KLASİK İNDEKSLER ---
+    if "NLR" not in df.columns and "NE#" in df.columns and "LY#" in df.columns: 
+        df["NLR"] = ne / ly
+    if "PLR" not in df.columns and "PLT" in df.columns and "LY#" in df.columns: 
+        df["PLR"] = plt_cnt / ly
+    if "LMR" not in df.columns and "LY#" in df.columns and "MO#" in df.columns: 
+        df["LMR"] = ly / mo
+    if "SII" not in df.columns and "PLT" in df.columns and "NE#" in df.columns and "LY#" in df.columns: 
+        df["SII"] = (plt_cnt * ne) / ly
+    if "SIRI" not in df.columns and "NE#" in df.columns and "MO#" in df.columns and "LY#" in df.columns: 
+        df["SIRI"] = (ne * mo) / ly
+    if "AISI" not in df.columns and "NE#" in df.columns and "PLT" in df.columns and "MO#" in df.columns: 
+        df["AISI"] = (ne * plt_cnt * mo) / ly
+    if "Mentzer" not in df.columns and "MCV" in df.columns and "RBC" in df.columns: 
+        df["Mentzer"] = mcv / rbc
+
+    # --- 3. YENİ GELİŞMİŞ PARAMETRELER ---
+    
+    # Öneri 1: SII / Hemoglobin
+    if "SII" in df.columns and "HGB" in df.columns:
+        df["SII_HGB_Ratio"] = df["SII"] / hgb
+
+    # Öneri 2: SII * MCV
+    if "SII" in df.columns and "MCV" in df.columns:
+        df["SII_MCV_Score"] = df["SII"] * mcv
+
+    # Öneri 3: Pan-B12 Skoru ((SII * RDW) / HGB)
+    # Burada rdw_val değişkenini kullanıyoruz (yukarıda tanımladık)
+    if "SII" in df.columns and "HGB" in df.columns and rdw_val is not np.nan:
+        df["Pan_B12_Index"] = (df["SII"] * rdw_val) / hgb
+
     return df.replace([np.inf, -np.inf], np.nan)
 
 def segment_age_groups(df: pd.DataFrame) -> pd.DataFrame:
@@ -297,6 +339,58 @@ def perform_advanced_roc(df, target_vitamin, threshold, feature_cols, condition_
     
     return pd.DataFrame(results).sort_values("AUC", ascending=False), fig
 
+def perform_multivariate_roc(df, target_col, threshold, features):
+    """
+    Seçilen birden fazla özelliği Lojistik Regresyon ile birleştirip
+    tek bir 'Kombine Model Skoru' oluşturur ve ROC çizer.
+    """
+    # Veriyi hazırla
+    temp_df = df.dropna(subset=[target_col] + features).copy()
+    if temp_df.empty:
+        return None, None
+
+    # Hedef (1: Hasta, 0: Sağlam) - Threshold mantığı
+    y = (temp_df[target_col] < threshold).astype(int)
+    
+    # Eğer sınıflardan biri hiç yoksa hata döner
+    if len(np.unique(y)) < 2:
+        return "Yetersiz varyasyon (Tüm hastalar aynı grupta)", None
+
+    X = temp_df[features]
+
+    # Standardizasyon (Regresyon için önemlidir)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # Modeli Kur (Lojistik Regresyon)
+    model = LogisticRegression(class_weight='balanced')
+    model.fit(X_scaled, y)
+
+    # Olasılık Skorlarını Al (0 ile 1 arası bir risk puanı)
+    y_probs = model.predict_proba(X_scaled)[:, 1]
+
+    # ROC Hesapla
+    fpr, tpr, _ = roc_curve(y, y_probs)
+    roc_auc = auc(fpr, tpr)
+
+    # Grafik Çiz
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(fpr, tpr, label=f'Kombine Model (AUC = {roc_auc:.3f})', color='darkorange', lw=2)
+    ax.plot([0, 1], [0, 1], 'k--', lw=2)
+    
+    # Hangi parametre ne kadar etkili oldu? (Katsayılar)
+    coef_text = "\n".join([f"{feat}: {coef:.2f}" for feat, coef in zip(features, model.coef_[0])])
+    
+    ax.set_title(f'Çok Değişkenli Model ROC (Hedef: {target_col} < {threshold})')
+    ax.set_xlabel('False Positive Rate')
+    ax.set_ylabel('True Positive Rate')
+    ax.legend(loc="lower right")
+    
+    # Katsayıları grafiğin kenarına not düş (Opsiyonel bilgi)
+    plt.gcf().text(0.92, 0.5, f"Parametre Ağırlıkları:\n{coef_text}", fontsize=10, bbox=dict(facecolor='white', alpha=0.5))
+
+    return f"Model AUC: {roc_auc:.3f}", fig
+
 @st.cache_data(show_spinner=False)
 def read_uploaded_file(file_bytes: bytes, filename: str, encoding: str, user_sep: str):
     ext = os.path.splitext(filename.lower())[1]
@@ -344,7 +438,19 @@ df = segment_clinical_groups(df)
 st.divider()
 st.header("📋 Detaylı Klinik İstatistikler ve Grafikler")
 
-target_params = ["B12", "VİTAMİN D", "WBC", "HGB", "HCT", "MCV", "PLT", "NE#", "LY#", "MO#", "EO#", "BA#", "RDW-CV", "RDW-SD", "MPV", "PCT", "PDW", "NLR", "PLR", "LMR", "SII", "SIRI", "AISI", "Mentzer"]
+# --- İSTATİSTİK ve GRAFİK BÖLÜMÜ ---
+st.divider()
+st.header("📋 Detaylı Klinik İstatistikler ve Grafikler")
+
+# LİSTEYE YENİ PARAMETRELERİ EKLEDİK (En Sona Bakın)
+target_params = [
+    "B12", "VİTAMİN D", "WBC", "HGB", "HCT", "MCV", "PLT", 
+    "NE#", "LY#", "MO#", "EO#", "BA#", "RDW-CV", "RDW-SD", 
+    "MPV", "PCT", "PDW", "NLR", "PLR", "LMR", "SII", "SIRI", 
+    "AISI", "Mentzer",
+    "SII_HGB_Ratio", "SII_MCV_Score", "Pan_B12_Index"  # <-- YENİ EKLENENLER
+]
+
 present_params = [p for p in target_params if p in df.columns]
 
 group_options = {}
@@ -453,7 +559,7 @@ with tab2:
         # DİKKAT: Kontrolü df_analysis üzerinden yapıyoruz
         if target_col in df_analysis.columns and roc_features:
             # Fonksiyona df yerine df_analysis gönderiyoruz
-            res_df, fig_roc = perform_roc_analysis(df_analysis, target_col, threshold, roc_features)
+            res_df, fig_roc = perform_advanced_roc(df_analysis, target_col, threshold, roc_features)
             
             if isinstance(res_df, str): 
                 st.error(f"Hata: {res_df} (Seçilen yaş grubunda sadece 'Hasta' veya sadece 'Sağlam' kişiler kalmış olabilir).")
