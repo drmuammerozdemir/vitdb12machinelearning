@@ -487,10 +487,52 @@ with st.sidebar:
 st.caption("Not: Bu uygulama klinik karar aracı değildir; araştırma/hipotez amaçlıdır.")
 
 
-# --- MAIN KISMI (İstatistik Tablosunu Çağırma) ---
+# --- MAIN KISMI ---
 
-# ... (df = segment_age_groups(df) dedikten sonra) ...
+# ---------------------------------------------------------
+# ADIM 1: DOSYAYI OKU, KONTROL ET VE 'df' OLUŞTUR (ÖNCE BU ÇALIŞMALI)
+# ---------------------------------------------------------
+if uploaded is None:
+    st.info("Başlamak için XLSX veya CSV dosyanı yükle.")
+    st.stop()
 
+# Tip kontrolü (net hata mesajı)
+ext = os.path.splitext(uploaded.name.lower())[1]
+if ext not in [".xlsx", ".xls", ".csv"]:
+    st.error(f"Desteklenmeyen dosya türü: {ext} (Sadece .xlsx / .xls / .csv)")
+    st.stop()
+
+# Read (XLSX/CSV)
+file_bytes = uploaded.getvalue()
+try:
+    df_raw, read_mode, bad_lines = read_uploaded_file(
+        file_bytes=file_bytes,
+        filename=uploaded.name,
+        encoding=encoding,
+        user_sep=sep,
+    )
+except Exception as e:
+    st.error(f"Dosya okunamadı: {e}")
+    st.stop()
+
+st.success(f"Dosya okundu ✅ ({read_mode}) | satır: {len(df_raw):,} | sütun: {df_raw.shape[1]}")
+
+if bad_lines:
+    st.warning(f"{len(bad_lines)} bozuk satır CSV'den atlandı.")
+
+# Veriyi Temizle
+df = clean_dataframe(df_raw)
+
+# İndeks Hesaplama
+df = calculate_derived_indices(df)
+
+# Yaş Gruplama
+if "HASTA_YAS" in df.columns:
+    df = segment_age_groups(df)
+
+# ---------------------------------------------------------
+# ADIM 2: İSTATİSTİK TABLOSUNU ÇAĞIR (ARTIK df HAZIR)
+# ---------------------------------------------------------
 if "Yas_Grubu" in df.columns:
     # Senin verdiğin tam liste üzerinden kontrol yapıyoruz
     target_params = [
