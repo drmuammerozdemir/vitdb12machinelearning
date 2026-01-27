@@ -62,17 +62,18 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_derived_indices(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     
-    # --- 1. DEĞİŞKENLERİ GÜVENLİ ŞEKİLDE ÇEK (HATA ÖNLEYİCİ) ---
-    # .get() metodu sütun yoksa hata vermek yerine NaN döndürür, kod patlamaz.
+    # --- 1. DEĞİŞKENLERİ GÜVENLİ ŞEKİLDE ÇEK ---
     ne = df.get("NE#", np.nan)
     ly = df.get("LY#", np.nan)
     mo = df.get("MO#", np.nan)
     plt_cnt = df.get("PLT", np.nan)
     rbc = df.get("RBC", np.nan)
     mcv = df.get("MCV", np.nan)
+    hct = df.get("HCT", np.nan) # HCT'yi de çektik
     hgb = df.get("HGB", np.nan)
+    wbc = df.get("WBC", np.nan)
     
-    # RDW değişkenini belirle (CV veya SD hangisi varsa)
+    # RDW değişkenini belirle
     rdw_val = np.nan
     if "RDW-CV" in df.columns:
         rdw_val = df["RDW-CV"]
@@ -95,20 +96,44 @@ def calculate_derived_indices(df: pd.DataFrame) -> pd.DataFrame:
     if "Mentzer" not in df.columns and "MCV" in df.columns and "RBC" in df.columns: 
         df["Mentzer"] = mcv / rbc
 
-    # --- 3. YENİ GELİŞMİŞ PARAMETRELER ---
-    
-    # Öneri 1: SII / Hemoglobin
+    # --- 3. ÖNCEKİ DENEMELER ---
     if "SII" in df.columns and "HGB" in df.columns:
         df["SII_HGB_Ratio"] = df["SII"] / hgb
-
-    # Öneri 2: SII * MCV
     if "SII" in df.columns and "MCV" in df.columns:
         df["SII_MCV_Score"] = df["SII"] * mcv
-
-    # Öneri 3: Pan-B12 Skoru ((SII * RDW) / HGB)
-    # Burada rdw_val değişkenini kullanıyoruz (yukarıda tanımladık)
     if "SII" in df.columns and "HGB" in df.columns and rdw_val is not np.nan:
         df["Pan_B12_Index"] = (df["SII"] * rdw_val) / hgb
+
+    # --- 4. YENİ "DENEYSEL" PARAMETRELER (ŞİMDİ EKLENDİ) ---
+    
+    # 1. Mega-Anemi İndeksi: (MCV * RDW) / RBC
+    if "MCV" in df.columns and "RBC" in df.columns and rdw_val is not np.nan:
+        df["Mega_Index"] = (mcv * rdw_val) / rbc
+    # Sizin Öneriniz: Mega * MCV (MCV'nin karesi)
+        # Formül: (MCV * MCV * RDW) / RBC
+        df["Mega_Squared"] = (mcv * mcv * rdw_val) / rbc
+
+    # 2. Pansitopeni Skoru: (HGB * WBC * PLT) / 10000
+    if "HGB" in df.columns and "WBC" in df.columns and "PLT" in df.columns:
+        df["Pancyto_Score"] = (hgb * wbc * plt_cnt) / 10000
+
+    # 3. Enflamatuar Oksijenasyon: (NE# * MCV) / HGB
+    if "NE#" in df.columns and "MCV" in df.columns and "HGB" in df.columns:
+        df["Immune_O2"] = (ne * mcv) / hgb
+    
+    # --- 4. YENİ "HİBRİT" PARAMETRELER (ŞİMDİ EKLENDİ) ---
+    
+    # 1. Giga_Index (Mega * Mentzer)
+    if "Mega_Index" in df.columns and "Mentzer" in df.columns:
+        df["Giga_Index"] = df["Mega_Index"] * df["Mentzer"]
+
+    # 2. Deep_B12 (Mega / HCT)
+    if "Mega_Index" in df.columns and "HCT" in df.columns:
+        df["Deep_B12"] = df["Mega_Index"] / hct
+
+    # 3. Mega_AISI (Mega / AISI)
+    if "Mega_Index" in df.columns and "AISI" in df.columns:
+        df["Mega_AISI"] = df["Mega_Index"] / df["AISI"]
 
     return df.replace([np.inf, -np.inf], np.nan)
 
@@ -448,15 +473,13 @@ st.header("📋 Detaylı Klinik İstatistikler ve Grafikler")
 st.divider()
 st.header("📋 Detaylı Klinik İstatistikler ve Grafikler")
 
-# LİSTEYE YENİ PARAMETRELERİ EKLEDİK (En Sona Bakın)
 target_params = [
-    "B12", "VİTAMİN D", "WBC", "HGB", "HCT", "MCV", "PLT", 
+   "Mega_Squared", "Giga_Index", "Deep_B12", "Mega_AISI", "Mega_Index", "Pancyto_Score", "Immune_O2",  # <-- YENİLER EN BAŞTA
+    "HASTA_YAS", "B12", "VİTAMİN D", "WBC", "HGB", "HCT", "MCV", "PLT", 
     "NE#", "LY#", "MO#", "EO#", "BA#", "RDW-CV", "RDW-SD", 
     "MPV", "PCT", "PDW", "NLR", "PLR", "LMR", "SII", "SIRI", 
-    "AISI", "Mentzer",
-    "SII_HGB_Ratio", "SII_MCV_Score", "Pan_B12_Index"  # <-- YENİ EKLENENLER
+    "AISI", "Mentzer", "Pan_B12_Index"
 ]
-
 present_params = [p for p in target_params if p in df.columns]
 
 group_options = {}
@@ -639,7 +662,7 @@ with tab2:
                 with c2:
                     st.markdown("### 📊 Parametre Önem Düzeyleri")
                     st.write(f"**{model_res}**")
-                    st.caption("Katsayı ne kadar büyükse (negatif veya pozitif), parametre o kadar önemlidir.")
+                    st.caption("Katsayı ne kadar büyükse (negatif veya pozitif), parafmetre o kadar önemlidir.")
                     
                     # Tabloyu Renkli Göster
                     st.dataframe(
