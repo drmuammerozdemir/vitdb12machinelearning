@@ -216,20 +216,31 @@ def build_pipeline(X: pd.DataFrame, model, scale_numeric: bool = False) -> Pipel
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    # Önce sütun isimlerini temizle
     df.columns = [normalize_colname(c) for c in df.columns]
 
+    # Sayısal Dönüşümler
     for col in df.columns:
         if col == "CINSIYET":
             continue
         if col == "PROTOKOL_NO":
             df[col] = df[col].astype(str)
             continue
+        # B12, Vitamin D ve Yaş dahil sayısal yap
         if df[col].dtype == object or "VİTAMİN" in col or col in {"B12", "HASTA_YAS"}:
             df[col] = safe_to_numeric(df[col])
 
+    # CİNSİYET DÜZELTMESİ (1 -> E, 2 -> K)
     if "CINSIYET" in df.columns:
-        df["CINSIYET"] = df["CINSIYET"].astype(str).str.strip().str.upper()
-        df["CINSIYET"] = df["CINSIYET"].replace({"ERKEK": "E", "KADIN": "K", "MALE": "E", "FEMALE": "K"})
+        # Önce string'e çevir, varsa .0'ları at (Excel bazen 1.0 diye okur)
+        s = df["CINSIYET"].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        
+        # Haritalama yap
+        mapping = {"1": "E", "2": "K", "ERKEK": "E", "KADIN": "K", "MALE": "E", "FEMALE": "K"}
+        df["CINSIYET"] = s.map(mapping).fillna(s) # Eşleşmezse eski halini koru
+        
+        # Son temizlik
+        df["CINSIYET"] = df["CINSIYET"].astype(str).str.upper()
 
     return df
 
@@ -311,19 +322,16 @@ def segment_age_groups(df: pd.DataFrame) -> pd.DataFrame:
     df['Yas_Grubu'] = np.select(conditions, choices, default='Diğer')
     return df
 
-def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list):
+def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list, force_parametric: bool = False):
     """
-    1. Sütun başlıklarını (n sayılarını) en baştaki toplam grup sayısına göre sabitler.
-    2. Her parametre için Shapiro-Wilk testi uygular.
-       - Normal Dağılım -> Ortalama ± SS (ANOVA)
-       - Normal Değil -> Medyan (Min - Max) (Kruskal-Wallis)
+    force_parametric=True ise: Normallik testine bakmaksızın Ortalama ± SS verir.
+    force_parametric=False ise: Shapiro-Wilk sonucuna göre otomatik seçer.
     """
     results = []
     
-    # Grupları Tanımla
     valid_groups = ['Okul Öncesi (0-5)', 'Okul Çağı (6-11)', 'Adolesan (12-17)']
     
-    # 1. ADIM: Başlıkları ve n Sayılarını SABİTLE (Kaymayı önler)
+    # 1. BAŞLIKLARI VE TOPLAM SAYILARI SABİTLE
     group_counts = df[groups_col].value_counts()
     
     n1 = group_counts.get(valid_groups[0], 0)
@@ -334,41 +342,44 @@ def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list
     col_name_2 = f"{valid_groups[1]} (n={n2})"
     col_name_3 = f"{valid_groups[2]} (n={n3})"
     
-    # Veriyi filtrele
     df_stat = df[df[groups_col].isin(valid_groups)].copy()
 
     for p in params:
+        # Eğer parametre sütunu veride hiç yoksa atla (Hata vermemesi için)
         if p not in df_stat.columns:
             continue
             
         clean_col = df_stat.dropna(subset=[p])
+        
         g1 = clean_col[clean_col[groups_col] == valid_groups[0]][p]
         g2 = clean_col[clean_col[groups_col] == valid_groups[1]][p]
         g3 = clean_col[clean_col[groups_col] == valid_groups[2]][p]
         
-        # Yetersiz veri varsa atla (En az 3 veri gerekli Shapiro için)
+        # Shapiro testi için en az 3 veri gerekir
         if len(g1) < 3 or len(g2) < 3 or len(g3) < 3:
             continue
             
-        # 2. ADIM: Shapiro-Wilk Normallik Testi
-        try:
-            _, p1 = shapiro(g1)
-            _, p2 = shapiro(g2)
-            _, p3 = shapiro(g3)
-            # Tüm gruplar normalse (p > 0.05) Parametrik seç
-            is_normal = (p1 > 0.05) and (p2 > 0.05) and (p3 > 0.05)
-        except:
-            is_normal = False
-            
-        # 3. ADIM: Değerleri Yazdır
-        if is_normal:
+        # 2. NORMALLİK TESTİ (Sadece otomatik modda çalışır)
+        is_normal = False
+        if not force_parametric:
+            try:
+                _, p1 = shapiro(g1)
+                _, p2 = shapiro(g2)
+                _, p3 = shapiro(g3)
+                is_normal = (p1 > 0.05) and (p2 > 0.05) and (p3 > 0.05)
+            except:
+                is_normal = False # Hata durumunda non-parametrik
+        
+        # 3. FORMATLAMA
+        # Kullanıcı zorladıysa (force) veya veri gerçekten normalse -> Parametrik
+        if force_parametric or is_normal:
             # --- PARAMETRİK (Ortalama ± SS) ---
             val1 = f"{g1.mean():.2f} ± {g1.std():.2f}"
             val2 = f"{g2.mean():.2f} ± {g2.std():.2f}"
             val3 = f"{g3.mean():.2f} ± {g3.std():.2f}"
             try:
                 _, p_val = f_oneway(g1, g2, g3)
-                test_desc = "Parametrik (ANOVA)"
+                test_desc = "ANOVA (Mean±SD)"
             except:
                 p_val = 1.0
                 test_desc = "Hata"
@@ -379,7 +390,7 @@ def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list
             val3 = f"{g3.median():.2f} ({g3.min():.2f} - {g3.max():.2f})"
             try:
                 _, p_val = kruskal(g1, g2, g3)
-                test_desc = "Non-Param. (Kruskal-Wallis)"
+                test_desc = "Kruskal-Wallis (Med[Min-Max])"
             except:
                 p_val = 1.0
                 test_desc = "Hata"
@@ -392,7 +403,7 @@ def generate_stat_table_advanced(df: pd.DataFrame, groups_col: str, params: list
             col_name_2: val2,
             col_name_3: val3,
             "P Değeri": p_text,
-            "Dağılım / Test": test_desc
+            "Metod": test_desc
         })
         
     return pd.DataFrame(results)
@@ -467,6 +478,39 @@ with st.sidebar:
     # Varsayılanı kapalı yapıyoruz, kullanıcı isterse açsın (Hata önlemek için)
     do_perm_importance = st.checkbox("Permutation importance hesapla (Dikkat: Yavaş ve RAM tüketir)", value=False)
     perm_repeats = st.slider("Permutation tekrar", 2, 10, 5, 1) # Varsayılanı 5'e düşürdük
+    
+    st.divider()
+    st.header("Ayarlar")
+    
+    # BU KUTUYU EKLE
+    force_para = st.checkbox("Normallik Testini Yoksay (Hepsini Mean ± SD Ver)", value=False)
+    
+    target_choice = st.radio("Hedef", ["B12", "VİTAMİN D"], index=0)
+    # ... (diğer ayarlar) ...
+
+
+# --- MAIN KISMI (İstatistik Tablosunu Çağırma) ---
+
+# ... (df = segment_age_groups(df) dedikten sonra) ...
+
+if "Yas_Grubu" in df.columns:
+    # Senin verdiğin tam liste üzerinden kontrol yapıyoruz
+    target_params = [
+        "WBC", "HGB", "HCT", "MCV", "PLT", "NE#", "LY#", "MO#", "EO#", "BA#", 
+        "RDW-CV", "RDW-SD", "MPV", "PCT", "PDW", # Rutinler
+        "NLR", "PLR", "LMR", "SII", "SIRI", "AISI", "Mentzer" # Hesaplananlar
+    ]
+    # Sadece veri setinde OLANLARI al (Hata almamak için)
+    present_params = [p for p in target_params if p in df.columns]
+    
+    # FORCE PARAMETRIC DEĞERİNİ BURAYA GÖNDERİYORUZ
+    stat_table = generate_stat_table_advanced(df, "Yas_Grubu", present_params, force_parametric=force_para)
+    
+    if not stat_table.empty:
+        st.dataframe(stat_table, use_container_width=True, hide_index=True)
+
+    
+
 
 st.caption("Not: Bu uygulama klinik karar aracı değildir; araştırma/hipotez amaçlıdır.")
 
