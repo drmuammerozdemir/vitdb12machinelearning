@@ -10,3 +10,4 @@ catboost
 matplotlib
 seaborn
 scipy
+statsmodels
