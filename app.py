@@ -677,7 +677,9 @@ if "CINSIYET" in df.columns:
 # Filtreler
 n0 = len(df)
 df = df[(df["YAS"].between(age_min, age_max))].copy()
+n_after_age = len(df)
 df = df[(df["WBC"] > 0) & (df["LY#"] > 0) & (df["NE#"] >= 0) & (df["PLT"] > 0)].copy()
+n_after_cbc = len(df)
 
 # İndeksler
 df = compute_indices(df)
@@ -688,6 +690,30 @@ df["VITD_KAT"] = df["VITD"].apply(lambda v: classify_vitd(v, vitd_def, vitd_ins)
 df["B12_EKSIK"]   = (df["B12"]  < b12_def).astype("Int64")
 df["VITD_EKSIK"]  = (df["VITD"] < vitd_def).astype("Int64")
 df["YAS_GRUBU"]   = df["YAS"].apply(age_group)
+
+# --- STROBE akis sayilari (kohort secim semasi icin) ---
+try:
+    _b12_ok  = df["B12"].notna()
+    _vitd_ok = df["VITD"].notna()
+    _cls_mask = _b12_ok & _vitd_ok
+    _cls = df[_cls_mask].copy()
+    _b = _cls["B12_EKSIK"].astype("Int64").astype(float)
+    _d = _cls["VITD_EKSIK"].astype("Int64").astype(float)
+    FLOW_COUNTS = {
+        "n0": int(n0),
+        "n_after_age": int(n_after_age),
+        "n_after_cbc": int(n_after_cbc),
+        "n_excl_age": int(n0 - n_after_age),
+        "n_excl_cbc": int(n_after_age - n_after_cbc),
+        "n_missing_lab": int((~_cls_mask).sum()),
+        "n_class": int(_cls_mask.sum()),
+        "g_kontrol":  int(((_b == 0) & (_d == 0)).sum()),
+        "g_izoleD":   int(((_b == 0) & (_d == 1)).sum()),
+        "g_izoleB12": int(((_b == 1) & (_d == 0)).sum()),
+        "g_kombine":  int(((_b == 1) & (_d == 1)).sum()),
+    }
+except Exception:
+    FLOW_COUNTS = {}
 
 # Genel özet
 c1, c2, c3, c4 = st.columns(4)
@@ -703,6 +729,49 @@ with st.expander("📋 Verinin İlk 20 Satırı"):
 # =========================================================================
 # SEKMELER
 # =========================================================================
+def univariate_logistic(df, y_col, predictors):
+    """Her prediktor icin tek-degiskenli lojistik regresyon (OR per 1-SD)."""
+    rows = []
+    y_all = pd.to_numeric(df[y_col], errors="coerce")
+    for p in predictors:
+        if p == "CINSIYET":
+            if "CINSIYET_LBL" not in df.columns:
+                continue
+            x_raw = (df["CINSIYET_LBL"] == "Erkek").astype(float)
+            is_std = False
+        else:
+            if p not in df.columns:
+                continue
+            x_raw = pd.to_numeric(df[p], errors="coerce")
+            is_std = True
+        d = pd.DataFrame({"y": y_all, "x": x_raw}).replace(
+            [np.inf, -np.inf], np.nan).dropna()
+        if d["y"].nunique() < 2 or len(d) < 10:
+            continue
+        xv = d["x"].values.astype(float)
+        if is_std and xv.std() > 0:
+            xv = (xv - xv.mean()) / xv.std()
+        Xc = sm.add_constant(xv, has_constant="add")
+        try:
+            m = sm.Logit(d["y"].values.astype(int), Xc).fit(disp=0, maxiter=200)
+            beta = float(m.params[1]); pval = float(m.pvalues[1])
+            lo_b, hi_b = m.conf_int()[1]
+            OR = float(np.exp(beta))
+            lo = float(np.exp(lo_b)); hi = float(np.exp(hi_b))
+        except Exception:
+            continue
+        rows.append({
+            "Değişken": p, "OR": OR, "%95 CI alt": lo, "%95 CI üst": hi,
+            "p": pval, "n": int(len(d)),
+            "Ölçek": "1-SD" if is_std else "Erkek vs Kız",
+        })
+    res = pd.DataFrame(rows)
+    if not res.empty:
+        res["p_FDR"] = multipletests(res["p"], method="fdr_bh")[1]
+        res = res.sort_values("p").reset_index(drop=True)
+    return res
+
+
 tabs = st.tabs([
     "1) Tanımlayıcı İstatistik",
     "2) Frekans Tabloları",
@@ -726,6 +795,44 @@ ALL_NUM = [c for c in (["YAS"] + HEMA_COLS + LAB_COLS + INDEX_COLS) if c in df.c
 
 # --- Sekme 1 ----------------------------------------------------------------
 with tabs[0]:
+    with st.expander("🧭 Kohort akış şeması (STROBE) — sayılar", expanded=True):
+        fc = FLOW_COUNTS
+        if not fc:
+            st.info("Akış sayıları hesaplanamadı.")
+        else:
+            st.caption(
+                "Şekildeki n = ___ kutularını bu sayılarla doldurun. Ara bant "
+                "(Vit D 12–20 / B12 200–300) dışlanmıyor; yeterli/normal "
+                "grubuna dahildir."
+            )
+            ladder = pd.DataFrame([
+                {"Adım": "Veri tabanı kayıtları (ham)",
+                 "Çıkarılan": "—", "Kalan n": fc["n0"]},
+                {"Adım": f"Yaş {age_min}–{age_max} dışı çıkarıldı",
+                 "Çıkarılan": fc["n_excl_age"], "Kalan n": fc["n_after_age"]},
+                {"Adım": "Geçersiz CBC (WBC/LY/PLT ≤ 0) çıkarıldı",
+                 "Çıkarılan": fc["n_excl_cbc"], "Kalan n": fc["n_after_cbc"]},
+                {"Adım": "B12 veya Vit D eksik (sınıflanamadı)",
+                 "Çıkarılan": fc["n_missing_lab"], "Kalan n": fc["n_class"]},
+            ])
+            st.dataframe(ladder, use_container_width=True, hide_index=True)
+            nT = max(fc["n_class"], 1)
+            groups = pd.DataFrame([
+                {"Grup": "Kontrol", "n": fc["g_kontrol"],
+                 "%": f"{100*fc['g_kontrol']/nT:.1f}%"},
+                {"Grup": "İzole D eksikliği", "n": fc["g_izoleD"],
+                 "%": f"{100*fc['g_izoleD']/nT:.1f}%"},
+                {"Grup": "İzole B12 eksikliği", "n": fc["g_izoleB12"],
+                 "%": f"{100*fc['g_izoleB12']/nT:.1f}%"},
+                {"Grup": "Kombine eksiklik", "n": fc["g_kombine"],
+                 "%": f"{100*fc['g_kombine']/nT:.1f}%"},
+            ])
+            st.dataframe(groups, use_container_width=True, hide_index=True)
+            st.caption(
+                f"Sınıflanabilir kohort: n = {fc['n_class']:,}  |  4 grup toplamı: "
+                f"{fc['g_kontrol']+fc['g_izoleD']+fc['g_izoleB12']+fc['g_kombine']:,}"
+            )
+
     st.subheader("Tanımlayıcı İstatistikler")
     desc = descriptive(df, ALL_NUM)
     st.dataframe(desc, use_container_width=True)
@@ -1200,18 +1307,92 @@ with tabs[8]:
                       f"{100*n_pos/(n_pos+n_neg):.1f}% olay")
 
         # --- Predictor seçimi ---
-        candidate_predictors = [p for p in INDEX_COLS if p in df.columns]
+        candidate_predictors = ([p for p in INDEX_COLS if p in df.columns] +
+                                [p for p in HEMA_COLS if p in df.columns])
         if "YAS" in df.columns:
             candidate_predictors.append("YAS")
         if "CINSIYET_LBL" in df.columns:
             candidate_predictors.append("CINSIYET")
 
+        # ============================================================
+        # ADIM 1 - UNIVARIATE TARAMA (her degisken tek tek)
+        # ============================================================
+        with st.expander("Adım 1 — Univariate tarama (tüm değişkenler tek tek)",
+                         expanded=True):
+            st.caption(
+                "Her bağımsız değişken için ayrı tek-değişkenli lojistik "
+                "regresyon (sürekli değişkenlerde OR = 1-SD artış başına). "
+                "Eşiğin altındakileri tek tıkla multivariate modele aktarın."
+            )
+            uc1, uc2, uc3 = st.columns([2, 1, 1])
+            with uc1:
+                univ_vars = st.multiselect(
+                    "Taranacak değişkenler",
+                    options=candidate_predictors,
+                    default=candidate_predictors,
+                    key=f"univ_vars_{y_col}",
+                )
+            with uc2:
+                univ_thresh = st.number_input(
+                    "p eşiği", value=0.05, min_value=0.001, max_value=0.50,
+                    step=0.01, format="%.3f", key=f"univ_thr_{y_col}",
+                )
+            with uc3:
+                univ_ptype = st.radio(
+                    "Eşik p türü", ["ham p", "FDR p"], index=0,
+                    key=f"univ_pt_{y_col}",
+                )
+            st.caption(
+                "Tarama için literatürde p < 0.20–0.25 de yaygındır "
+                "(confounder kaybetmemek için); daha kısıtlı model için 0.05."
+            )
+
+            if st.button("Univariate taramayı çalıştır",
+                         key=f"run_univ_{y_col}"):
+                if not univ_vars:
+                    st.warning("En az bir değişken seçin.")
+                else:
+                    with st.spinner("Univariate modeller çalışıyor..."):
+                        st.session_state[f"univ_res_{y_col}"] = \
+                            univariate_logistic(df, y_col, univ_vars)
+
+            ures = st.session_state.get(f"univ_res_{y_col}")
+            if ures is not None and not ures.empty:
+                pcol = "p" if univ_ptype == "ham p" else "p_FDR"
+                sig_list = ures.loc[ures[pcol] < univ_thresh,
+                                    "Değişken"].tolist()
+                disp = ures.copy()
+                disp["Anlamlı"] = (ures[pcol] < univ_thresh).map(
+                    {True: "evet", False: ""})
+                for c in ["OR", "%95 CI alt", "%95 CI üst"]:
+                    disp[c] = disp[c].map(lambda v: f"{v:.3f}")
+                disp["p"] = disp["p"].map(lambda v: f"{v:.4g}")
+                disp["p_FDR"] = disp["p_FDR"].map(lambda v: f"{v:.4g}")
+                disp = disp[["Değişken", "OR", "%95 CI alt", "%95 CI üst",
+                             "p", "p_FDR", "n", "Ölçek", "Anlamlı"]]
+                st.dataframe(disp, use_container_width=True, hide_index=True)
+                st.success(
+                    f"{pcol} < {univ_thresh:g}: {len(sig_list)} değişken — "
+                    + (", ".join(sig_list) if sig_list else "yok")
+                )
+                if st.button("Anlamlıları multivariate modele aktar",
+                             key=f"push_univ_{y_col}", type="primary",
+                             disabled=(len(sig_list) == 0)):
+                    st.session_state["reg_preds"] = sig_list
+                    st.rerun()
+
+        # --- Multivariate prediktor secimi ---
+        if "reg_preds" not in st.session_state:
+            st.session_state["reg_preds"] = [
+                p for p in ["NLR", "SII", "SIRI", "AISI", "YAS"]
+                if p in candidate_predictors]
+        st.session_state["reg_preds"] = [
+            p for p in st.session_state["reg_preds"]
+            if p in candidate_predictors]
         reg_predictors = st.multiselect(
-            "Bağımsız değişkenler (Predictors)",
+            "Bağımsız değişkenler (Predictors) — multivariate model",
             options=candidate_predictors,
-            default=[p for p in ["NLR", "SII", "SIRI", "AISI", "YAS"]
-                     if p in candidate_predictors],
-            key="reg_preds"
+            key="reg_preds",
         )
 
         # --- Model & seçenekler ---
